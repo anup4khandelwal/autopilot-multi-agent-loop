@@ -53,6 +53,10 @@ Define stricter rules in `.reviewos.yml`:
 
 - Per-path score penalties (engineering/product/design/security)
 - Required-tests policy for sensitive paths (can emit critical findings)
+- Optional required reviewer enforcement per path
+  - `required_users` (comma-separated usernames)
+  - `required_teams` (comma-separated org/team slugs)
+  - missing required coverage emits critical findings and can fail CI
 
 Example rules are included for:
 

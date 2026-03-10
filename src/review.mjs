@@ -331,6 +331,7 @@ function runAgentLoop({ pr, files, config, repoSlug }) {
       findings,
       mergeReadiness,
       history,
+      requiredReviewers: override.required,
     };
 
     if (signature === previousSignature) break;
@@ -427,6 +428,7 @@ function resolveReviewers(files, prAuthor, codeownerRules, maxReviewers = 3) {
 function applyPathOverrides({ files, config, hasTests }) {
   const adjustments = { engineering: 0, product: 0, design: 0, security: 0 };
   const findings = [];
+  const required = { users: new Set(), teams: new Set() };
   const rules = Object.entries(config.path_overrides || {});
 
   for (const [name, rule] of rules) {
@@ -464,9 +466,48 @@ function applyPathOverrides({ files, config, hasTests }) {
         message: rule.require_tests_message || `Rule '${name}' requires test updates for matched files.`,
       });
     }
+
+    const requiredUsers = String(rule.required_users || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const requiredTeams = String(rule.required_teams || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    for (const u of requiredUsers) required.users.add(u.replace(/^@/, ""));
+    for (const t of requiredTeams) required.teams.add(t.replace(/^@/, ""));
   }
 
-  return { adjustments, findings };
+  return { adjustments, findings, required: { users: [...required.users], teams: [...required.teams] } };
+}
+
+function collectCurrentReviewers(pr) {
+  const users = new Set();
+  const teams = new Set();
+
+  for (const u of pr.requested_reviewers || []) {
+    if (u?.login) users.add(u.login);
+  }
+  for (const t of pr.requested_teams || []) {
+    if (t?.slug && pr.base?.repo?.owner?.login) {
+      teams.add(`${pr.base.repo.owner.login}/${t.slug}`);
+    } else if (t?.slug) {
+      teams.add(t.slug);
+    }
+  }
+
+  return { users, teams };
+}
+
+function computeMissingRequired(required, current) {
+  const missingUsers = required.users.filter((u) => !current.users.has(u));
+  const missingTeams = required.teams.filter((t) => {
+    if (current.teams.has(t)) return false;
+    const short = t.includes("/") ? t.split("/").at(-1) : t;
+    return !current.teams.has(short);
+  });
+  return { users: missingUsers, teams: missingTeams };
 }
 
 function buildNextSteps(result, config) {
@@ -484,12 +525,16 @@ function buildNextSteps(result, config) {
   return nextSteps;
 }
 
-function buildComment({ pr, result, nextSteps, reviewerRouting }) {
+function buildComment({ pr, result, nextSteps, reviewerRouting, requiredCoverage }) {
   const fmt = (items, icon) => (items.length ? items.map((f) => `- ${icon} **${f.lens}**: ${f.message}`).join("\n") : "- None");
 
   const reviewersSection = reviewerRouting.enabled
     ? `### Suggested Reviewers (CODEOWNERS)\n- Users: ${reviewerRouting.users.length ? reviewerRouting.users.map((u) => `@${u}`).join(", ") : "None"}\n- Teams: ${reviewerRouting.teams.length ? reviewerRouting.teams.map((t) => `@${t}`).join(", ") : "None"}`
     : "### Suggested Reviewers (CODEOWNERS)\n- Reviewer routing disabled by config.";
+
+  const requiredSection = requiredCoverage
+    ? `### Required Reviewer Coverage (Path Policies)\n- Required users: ${requiredCoverage.required.users.length ? requiredCoverage.required.users.map((u) => `@${u}`).join(", ") : "None"}\n- Required teams: ${requiredCoverage.required.teams.length ? requiredCoverage.required.teams.map((t) => `@${t}`).join(", ") : "None"}\n- Missing users: ${requiredCoverage.missing.users.length ? requiredCoverage.missing.users.map((u) => `@${u}`).join(", ") : "None"}\n- Missing teams: ${requiredCoverage.missing.teams.length ? requiredCoverage.missing.teams.map((t) => `@${t}`).join(", ") : "None"}`
+    : "";
 
   return `${MARKER}
 ## ReviewOS Copilot Report
@@ -507,6 +552,8 @@ function buildComment({ pr, result, nextSteps, reviewerRouting }) {
 | Security | ${result.scores.security} |
 
 ${reviewersSection}
+
+${requiredSection}
 
 ### Findings
 
@@ -638,7 +685,53 @@ async function main() {
     ...resolveReviewers(files, pr.user?.login || "", codeownerRules, Number(config.reviewer_routing?.max_reviewers) || 3),
   };
 
-  const comment = buildComment({ pr, result, nextSteps, reviewerRouting });
+  const required = result.requiredReviewers || { users: [], teams: [] };
+  let currentCoverage = collectCurrentReviewers(pr);
+  let requestedViaRequired = false;
+
+  let missingRequired = computeMissingRequired(required, currentCoverage);
+  const shouldRequest = reviewerRouting.enabled && reviewerRouting.autoRequest && !mockPr;
+  if (shouldRequest && (missingRequired.users.length || missingRequired.teams.length)) {
+    const requestPayload = {
+      users: [...new Set([...reviewerRouting.users, ...missingRequired.users])],
+      teams: [...new Set([...reviewerRouting.teams, ...missingRequired.teams])],
+    };
+    const [owner, repo] = repoSlug.split("/");
+    await requestReviewers(owner, repo, pr.number, token, requestPayload);
+    requestedViaRequired = true;
+    currentCoverage = {
+      users: new Set([...currentCoverage.users, ...requestPayload.users]),
+      teams: new Set([...currentCoverage.teams, ...requestPayload.teams]),
+    };
+    missingRequired = computeMissingRequired(required, currentCoverage);
+  }
+
+  if (missingRequired.users.length || missingRequired.teams.length) {
+    result.findings = [
+      ...result.findings,
+      {
+        severity: "critical",
+        lens: "ReviewerPolicy",
+        message: `Missing required reviewer coverage. Users: ${missingRequired.users.join(",") || "none"}; Teams: ${missingRequired.teams.join(",") || "none"}.`,
+      },
+    ];
+    result.grouped = summarizeFindings(result.findings);
+    result.scores.security = clamp(result.scores.security - 10);
+    result.mergeReadiness = Math.round(
+      result.scores.engineering * Number(config.weights.engineering) +
+        result.scores.product * Number(config.weights.product) +
+        result.scores.design * Number(config.weights.design) +
+        result.scores.security * Number(config.weights.security)
+    );
+    nextSteps.unshift("Add missing required reviewers from path policy rules.");
+  }
+
+  const requiredCoverage = {
+    required,
+    missing: missingRequired,
+  };
+
+  const comment = buildComment({ pr, result, nextSteps, reviewerRouting, requiredCoverage });
 
   const historyEntry = {
     timestamp: new Date().toISOString(),
@@ -659,7 +752,12 @@ async function main() {
     const upsert = await upsertComment(owner, repo, pr.number, token, comment);
     console.log(`Review comment ${upsert.mode}: ${upsert.id}`);
 
-    if (reviewerRouting.enabled && reviewerRouting.autoRequest) {
+    if (
+      reviewerRouting.enabled &&
+      reviewerRouting.autoRequest &&
+      !requestedViaRequired &&
+      (reviewerRouting.users.length || reviewerRouting.teams.length)
+    ) {
       await requestReviewers(owner, repo, pr.number, token, reviewerRouting);
       console.log("Requested reviewers via GitHub API.");
     }

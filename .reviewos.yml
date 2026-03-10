@@ -27,6 +27,9 @@ path_overrides:
     require_tests: true
     missing_tests_security_penalty: 25
     require_tests_message: Auth path changes require test updates in the same PR.
+    # optional reviewer enforcement (comma-separated):
+    # required_users: anup4khandelwal
+    # required_teams: your-org/security-team
   workflow_paths:
     pattern: .github/workflows/*
     engineering_penalty: 4
