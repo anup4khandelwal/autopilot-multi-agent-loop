@@ -33,6 +33,7 @@ Use `.reviewos.yml`:
 - `reviewer_routing.enabled` enable CODEOWNERS suggestions
 - `reviewer_routing.auto_request` auto-request reviewers
 - `reviewer_routing.max_reviewers` cap requests
+- `path_overrides` apply path-based penalties and test requirements
 
 CI env override:
 
@@ -45,6 +46,18 @@ bash scripts/simulate-review.sh
 ```
 
 This runs the review loop on `scripts/mock-pr.json` + `scripts/mock-files.json` and writes history snapshots.
+
+## Path-based policy overrides
+
+Define stricter rules in `.reviewos.yml`:
+
+- Per-path score penalties (engineering/product/design/security)
+- Required-tests policy for sensitive paths (can emit critical findings)
+
+Example rules are included for:
+
+- `src/auth/*`
+- `.github/workflows/*`
 
 ## Build trend dashboard
 

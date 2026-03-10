@@ -18,3 +18,16 @@ reviewer_routing:
   enabled: true
   auto_request: false
   max_reviewers: 3
+
+path_overrides:
+  auth_paths:
+    pattern: src/auth/*
+    engineering_penalty: 5
+    security_penalty: 8
+    require_tests: true
+    missing_tests_security_penalty: 25
+    require_tests_message: Auth path changes require test updates in the same PR.
+  workflow_paths:
+    pattern: .github/workflows/*
+    engineering_penalty: 4
+    security_penalty: 6

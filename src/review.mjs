@@ -41,6 +41,7 @@ function loadConfig(configPath = ".reviewos.yml") {
       auto_request: false,
       max_reviewers: 3,
     },
+    path_overrides: {},
   };
 
   if (!fs.existsSync(configPath)) return defaults;
@@ -51,9 +52,11 @@ function loadConfig(configPath = ".reviewos.yml") {
     weights: { ...defaults.weights },
     thresholds: { ...defaults.thresholds },
     reviewer_routing: { ...defaults.reviewer_routing },
+    path_overrides: { ...defaults.path_overrides },
   };
 
   let section = null;
+  let subsection = null;
   for (const rawLine of data) {
     const line = rawLine.replace(/\t/g, "  ");
     if (!line.trim() || line.trim().startsWith("#")) continue;
@@ -65,10 +68,25 @@ function loadConfig(configPath = ".reviewos.yml") {
       const value = line.slice(idx + 1).trim();
       if (value === "") {
         section = key;
+        subsection = null;
       } else {
         parsed[key] = parseScalar(value);
         section = null;
+        subsection = null;
       }
+      continue;
+    }
+
+    if (line.startsWith("    ")) {
+      if (!section || !subsection) continue;
+      const child = line.trim();
+      const idx = child.indexOf(":");
+      if (idx === -1) continue;
+      const key = child.slice(0, idx).trim();
+      const value = parseScalar(child.slice(idx + 1).trim());
+      if (typeof parsed[section] !== "object" || parsed[section] === null) parsed[section] = {};
+      if (typeof parsed[section][subsection] !== "object" || parsed[section][subsection] === null) parsed[section][subsection] = {};
+      parsed[section][subsection][key] = value;
       continue;
     }
 
@@ -77,9 +95,15 @@ function loadConfig(configPath = ".reviewos.yml") {
     const idx = child.indexOf(":");
     if (idx === -1) continue;
     const key = child.slice(0, idx).trim();
-    const value = parseScalar(child.slice(idx + 1).trim());
+    const rawValue = child.slice(idx + 1).trim();
     if (typeof parsed[section] !== "object" || parsed[section] === null) parsed[section] = {};
-    parsed[section][key] = value;
+    if (rawValue === "") {
+      subsection = key;
+      if (typeof parsed[section][subsection] !== "object" || parsed[section][subsection] === null) parsed[section][subsection] = {};
+    } else {
+      parsed[section][key] = parseScalar(rawValue);
+      subsection = null;
+    }
   }
 
   return parsed;
@@ -269,27 +293,40 @@ function runAgentLoop({ pr, files, config, repoSlug }) {
     const product = scoreProduct(body);
     const design = scoreDesign(body, files);
     const security = scoreSecurity(files, eng);
+    const override = applyPathOverrides({ files, config, hasTests: eng.hasTests });
+    const scores = {
+      engineering: clamp(eng.score - override.adjustments.engineering),
+      product: clamp(product.score - override.adjustments.product),
+      design: clamp(design.score - override.adjustments.design),
+      security: clamp(security.score - override.adjustments.security),
+    };
 
-    let findings = dedupeFindings([...eng.findings, ...product.findings, ...design.findings, ...security.findings]);
+    let findings = dedupeFindings([
+      ...eng.findings,
+      ...product.findings,
+      ...design.findings,
+      ...security.findings,
+      ...override.findings,
+    ]);
     findings = addRecurringSignals(findings, history);
 
     const grouped = summarizeFindings(findings);
 
     const mergeReadiness = Math.round(
-      eng.score * Number(config.weights.engineering) +
-        product.score * Number(config.weights.product) +
-        design.score * Number(config.weights.design) +
-        security.score * Number(config.weights.security)
+      scores.engineering * Number(config.weights.engineering) +
+        scores.product * Number(config.weights.product) +
+        scores.design * Number(config.weights.design) +
+        scores.security * Number(config.weights.security)
     );
 
     const signature = JSON.stringify({
       findings: findings.map((f) => `${f.severity}|${f.lens}|${f.message}`).sort(),
-      scores: [eng.score, product.score, design.score, security.score],
+      scores: [scores.engineering, scores.product, scores.design, scores.security],
     });
 
     final = {
       iteration: i,
-      scores: { engineering: eng.score, product: product.score, design: design.score, security: security.score },
+      scores,
       grouped,
       findings,
       mergeReadiness,
@@ -333,8 +370,20 @@ function patternToRegex(pattern) {
   if (p.endsWith("/")) p += "**";
 
   const hasSlash = p.includes("/");
-  const placeholder = "__DS__";
-  let rx = escapeRegex(p).replace(/\*\*/g, placeholder).replace(/\*/g, "[^/]*").replace(new RegExp(placeholder, "g"), ".*");
+  let rx = "";
+  for (let i = 0; i < p.length; i += 1) {
+    const ch = p[i];
+    if (ch === "*") {
+      if (p[i + 1] === "*") {
+        rx += ".*";
+        i += 1;
+      } else {
+        rx += "[^/]*";
+      }
+    } else {
+      rx += escapeRegex(ch);
+    }
+  }
 
   if (!hasSlash) {
     rx = `(?:^|.*/)${rx}$`;
@@ -373,6 +422,51 @@ function resolveReviewers(files, prAuthor, codeownerRules, maxReviewers = 3) {
   const sortedUsers = [...users].sort().slice(0, Math.max(0, maxReviewers));
   const sortedTeams = [...teams].sort().slice(0, Math.max(0, maxReviewers));
   return { users: sortedUsers, teams: sortedTeams };
+}
+
+function applyPathOverrides({ files, config, hasTests }) {
+  const adjustments = { engineering: 0, product: 0, design: 0, security: 0 };
+  const findings = [];
+  const rules = Object.entries(config.path_overrides || {});
+
+  for (const [name, rule] of rules) {
+    if (!rule || typeof rule !== "object" || !rule.pattern) continue;
+    const regex = patternToRegex(String(rule.pattern));
+    const matched = files.filter((f) => regex.test(f.filename));
+    if (matched.length === 0) continue;
+
+    const matchedCount = matched.length;
+    const engPenalty = Number(rule.engineering_penalty || 0);
+    const productPenalty = Number(rule.product_penalty || 0);
+    const designPenalty = Number(rule.design_penalty || 0);
+    const securityPenalty = Number(rule.security_penalty || 0);
+
+    adjustments.engineering += engPenalty;
+    adjustments.product += productPenalty;
+    adjustments.design += designPenalty;
+    adjustments.security += securityPenalty;
+
+    if (engPenalty || productPenalty || designPenalty || securityPenalty) {
+      findings.push({
+        severity: "warning",
+        lens: "PathPolicy",
+        message: `Rule '${name}' matched ${matchedCount} file(s); penalties applied (eng:${engPenalty}, product:${productPenalty}, design:${designPenalty}, sec:${securityPenalty}).`,
+      });
+    }
+
+    const requireTests = Boolean(rule.require_tests);
+    if (requireTests && !hasTests) {
+      const missingPenalty = Number(rule.missing_tests_security_penalty || 20);
+      adjustments.security += missingPenalty;
+      findings.push({
+        severity: "critical",
+        lens: "PathPolicy",
+        message: rule.require_tests_message || `Rule '${name}' requires test updates for matched files.`,
+      });
+    }
+  }
+
+  return { adjustments, findings };
 }
 
 function buildNextSteps(result, config) {
