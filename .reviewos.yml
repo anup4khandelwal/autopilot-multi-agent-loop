@@ -16,7 +16,7 @@ fail_on_critical: true
 
 reviewer_routing:
   enabled: true
-  auto_request: false
+  auto_request: true
   max_reviewers: 3
 
 path_overrides:
@@ -34,3 +34,4 @@ path_overrides:
     pattern: .github/workflows/*
     engineering_penalty: 4
     security_penalty: 6
+    required_users: anup4khandelwal
