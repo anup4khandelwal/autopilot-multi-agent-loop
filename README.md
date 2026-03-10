@@ -2,6 +2,14 @@
 
 ReviewOps Copilot for pull requests. `review-os` shifts teams from implementation-heavy flow to structured review across Engineering, Product, Design, and Security.
 
+## Latest Update (v0.1.1)
+
+- Added path-based policy overrides (`path_overrides`) for stricter sensitive-path controls
+- Added required reviewer enforcement per path (`required_users`, `required_teams`)
+- Added CODEOWNERS-aware reviewer suggestions and optional auto-request
+- Added trend dashboard generation from review history
+- Fixed GitHub 422 edge case by preventing PR-author reviewer requests
+
 ## What it does
 
 - Runs on every PR update
