@@ -1,0 +1,15 @@
+# review-os repository configuration
+weights:
+  engineering: 0.35
+  product: 0.25
+  design: 0.15
+  security: 0.25
+
+thresholds:
+  engineering_warning: 70
+  product_warning: 70
+  design_warning: 75
+  security_warning: 75
+
+max_iterations: 3
+fail_on_critical: true

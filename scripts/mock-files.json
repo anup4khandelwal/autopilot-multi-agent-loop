@@ -1,0 +1,7 @@
+[
+  { "filename": "src/auth/session.ts" },
+  { "filename": "src/middleware/auth.ts" },
+  { "filename": "src/components/Dashboard.tsx" },
+  { "filename": "src/components/Dashboard.test.tsx" },
+  { "filename": ".github/workflows/deploy.yml" }
+]

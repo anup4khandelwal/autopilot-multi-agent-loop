@@ -1,0 +1,5 @@
+[
+  { "filename": "src/auth/session.ts" },
+  { "filename": "src/auth/token.ts" },
+  { "filename": ".github/workflows/deploy.yml" }
+]

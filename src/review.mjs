@@ -1,6 +1,8 @@
 import fs from "node:fs";
+import path from "node:path";
 
 const MARKER = "<!-- review-os:pr-review -->";
+const HISTORY_DIR = ".reviewos/history";
 
 function clamp(v, min = 0, max = 100) {
   return Math.max(min, Math.min(max, v));
@@ -11,10 +13,71 @@ function containsAny(text, needles) {
   return needles.some((n) => lower.includes(n));
 }
 
+function ensureDir(dirPath) {
+  fs.mkdirSync(dirPath, { recursive: true });
+}
+
+function parseScalar(value) {
+  const trimmed = value.trim();
+  if (trimmed === "true") return true;
+  if (trimmed === "false") return false;
+  if (!Number.isNaN(Number(trimmed)) && trimmed !== "") return Number(trimmed);
+  return trimmed;
+}
+
+function loadConfig(configPath = ".reviewos.yml") {
+  const defaults = {
+    weights: { engineering: 0.35, product: 0.25, design: 0.15, security: 0.25 },
+    thresholds: {
+      engineering_warning: 70,
+      product_warning: 70,
+      design_warning: 75,
+      security_warning: 75,
+    },
+    max_iterations: 3,
+    fail_on_critical: true,
+  };
+
+  if (!fs.existsSync(configPath)) return defaults;
+
+  const data = fs.readFileSync(configPath, "utf8").split(/\r?\n/);
+  const parsed = { ...defaults, weights: { ...defaults.weights }, thresholds: { ...defaults.thresholds } };
+
+  let section = null;
+  for (const rawLine of data) {
+    const line = rawLine.replace(/\t/g, "  ");
+    if (!line.trim() || line.trim().startsWith("#")) continue;
+
+    if (!line.startsWith("  ")) {
+      const idx = line.indexOf(":");
+      if (idx === -1) continue;
+      const key = line.slice(0, idx).trim();
+      const value = line.slice(idx + 1).trim();
+      if (value === "") {
+        section = key;
+      } else {
+        parsed[key] = parseScalar(value);
+        section = null;
+      }
+      continue;
+    }
+
+    if (!section) continue;
+    const child = line.trim();
+    const idx = child.indexOf(":");
+    if (idx === -1) continue;
+    const key = child.slice(0, idx).trim();
+    const value = parseScalar(child.slice(idx + 1).trim());
+    if (typeof parsed[section] !== "object" || parsed[section] === null) parsed[section] = {};
+    parsed[section][key] = value;
+  }
+
+  return parsed;
+}
+
 function scoreProduct(body) {
   let score = 100;
   const findings = [];
-
   const hasProblem = containsAny(body, ["problem", "pain", "why", "context"]);
   const hasImpact = containsAny(body, ["user impact", "customer", "who is affected", "persona"]);
   const hasAcceptance = containsAny(body, ["acceptance criteria", "definition of done", "success metric", "done when"]);
@@ -38,7 +101,9 @@ function scoreProduct(body) {
 function scoreDesign(body, files) {
   let score = 100;
   const findings = [];
-  const frontendTouched = files.some((f) => /(^|\/)(src|app|web|frontend|ui|components|pages)\//i.test(f.filename) || /\.(tsx|jsx|css|scss|vue)$/.test(f.filename));
+  const frontendTouched = files.some(
+    (f) => /(^|\/)(src|app|web|frontend|ui|components|pages)\//i.test(f.filename) || /\.(tsx|jsx|css|scss|vue)$/.test(f.filename)
+  );
 
   if (frontendTouched) {
     const hasEvidence = containsAny(body, ["screenshot", "recording", "figma", "ux", "ui", ".png", ".jpg", ".gif"]);
@@ -70,22 +135,18 @@ function scoreEngineering(files, additions, deletions) {
     findings.push({ severity: "warning", lens: "Engineering", message: `High diff volume: ${delta} lines changed.` });
   }
 
-  const riskyPatterns = [
-    /migrations?\//i,
-    /schema/i,
-    /auth|oauth|jwt|session|permission/i,
-    /payment|billing|invoice/i,
-    /\.github\/workflows\//i,
-    /dockerfile|k8s|terraform|helm/i,
-  ];
-
+  const riskyPatterns = [/migrations?\//i, /schema/i, /auth|oauth|jwt|session|permission/i, /payment|billing|invoice/i, /\.github\/workflows\//i, /dockerfile|k8s|terraform|helm/i];
   const risky = files.filter((f) => riskyPatterns.some((r) => r.test(f.filename)));
+
   if (risky.length > 0) {
     score -= Math.min(20, risky.length * 4);
     findings.push({ severity: "info", lens: "Engineering", message: `Risk-sensitive files touched (${risky.length}). Ensure focused reviewer coverage.` });
   }
 
-  const hasTests = files.some((f) => /(test|spec)\.(ts|tsx|js|jsx|py|go|rb)$/.test(f.filename) || /(^|\/)(tests?|__tests__)\//.test(f.filename));
+  const hasTests = files.some(
+    (f) => /(test|spec)\.(ts|tsx|js|jsx|py|go|rb)$/.test(f.filename) || /(^|\/)(tests?|__tests__)\//.test(f.filename)
+  );
+
   if (!hasTests) {
     score -= 15;
     findings.push({ severity: "warning", lens: "Engineering", message: "No test file changes detected." });
@@ -93,7 +154,7 @@ function scoreEngineering(files, additions, deletions) {
     score += 5;
   }
 
-  return { score: clamp(score), findings, riskyCount: risky.length, hasTests };
+  return { score: clamp(score), findings, hasTests, riskyCount: risky.length };
 }
 
 function scoreSecurity(files, engineering) {
@@ -108,52 +169,177 @@ function scoreSecurity(files, engineering) {
   }
 
   if (sensitive.length > 0 && !engineering.hasTests) {
-    findings.push({ severity: "critical", lens: "Security", message: "Sensitive changes detected without test updates." });
     score -= 20;
+    findings.push({ severity: "critical", lens: "Security", message: "Sensitive changes detected without test updates." });
   }
 
   return { score: clamp(score), findings };
 }
 
+function dedupeFindings(findings) {
+  const seen = new Set();
+  const out = [];
+  for (const f of findings) {
+    const key = `${f.severity}|${f.lens}|${f.message}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push(f);
+    }
+  }
+  return out;
+}
+
 function summarizeFindings(findings) {
-  const bySeverity = {
+  return {
     critical: findings.filter((f) => f.severity === "critical"),
     warning: findings.filter((f) => f.severity === "warning"),
     info: findings.filter((f) => f.severity === "info"),
   };
-  return bySeverity;
 }
 
-function buildComment({ pr, scores, mergeReadiness, grouped, nextSteps }) {
-  const fmt = (items, icon) =>
-    items.length
-      ? items.map((f) => `- ${icon} **${f.lens}**: ${f.message}`).join("\n")
-      : "- None";
+function historyFile(repoSlug, prNumber) {
+  const safeRepo = repoSlug.replace(/\//g, "__");
+  return path.join(HISTORY_DIR, `${safeRepo}__pr-${prNumber}.json`);
+}
+
+function loadHistory(repoSlug, prNumber) {
+  const file = historyFile(repoSlug, prNumber);
+  if (!fs.existsSync(file)) return [];
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    return [];
+  }
+}
+
+function saveHistory(repoSlug, prNumber, entry) {
+  ensureDir(HISTORY_DIR);
+  const file = historyFile(repoSlug, prNumber);
+  const prev = loadHistory(repoSlug, prNumber);
+  const next = [...prev.slice(-9), entry];
+  fs.writeFileSync(file, JSON.stringify(next, null, 2));
+  return file;
+}
+
+function addRecurringSignals(findings, history) {
+  if (history.length < 1) return findings;
+  const prev = history.at(-1);
+  if (!prev || !Array.isArray(prev.findings)) return findings;
+
+  const prevSet = new Set(prev.findings.map((f) => `${f.lens}|${f.message}`));
+  let recurringCount = 0;
+  for (const f of findings) {
+    if (prevSet.has(`${f.lens}|${f.message}`)) recurringCount += 1;
+  }
+
+  if (recurringCount > 0) {
+    return [
+      ...findings,
+      {
+        severity: "info",
+        lens: "Memory",
+        message: `Detected ${recurringCount} recurring finding(s) from previous review cycle.`,
+      },
+    ];
+  }
+
+  return findings;
+}
+
+function runAgentLoop({ pr, files, config, repoSlug }) {
+  const body = pr.body || "";
+  const history = loadHistory(repoSlug, pr.number);
+  const iterations = Math.max(1, Number(config.max_iterations) || 3);
+
+  let previousSignature = "";
+  let final = null;
+
+  for (let i = 1; i <= iterations; i += 1) {
+    const eng = scoreEngineering(files, pr.additions || 0, pr.deletions || 0);
+    const product = scoreProduct(body);
+    const design = scoreDesign(body, files);
+    const security = scoreSecurity(files, eng);
+
+    let findings = dedupeFindings([...eng.findings, ...product.findings, ...design.findings, ...security.findings]);
+    findings = addRecurringSignals(findings, history);
+
+    const grouped = summarizeFindings(findings);
+
+    const mergeReadiness = Math.round(
+      eng.score * Number(config.weights.engineering) +
+        product.score * Number(config.weights.product) +
+        design.score * Number(config.weights.design) +
+        security.score * Number(config.weights.security)
+    );
+
+    const signature = JSON.stringify({
+      findings: findings.map((f) => `${f.severity}|${f.lens}|${f.message}`).sort(),
+      scores: [eng.score, product.score, design.score, security.score],
+    });
+
+    final = {
+      iteration: i,
+      scores: { engineering: eng.score, product: product.score, design: design.score, security: security.score },
+      grouped,
+      findings,
+      mergeReadiness,
+      history,
+    };
+
+    // Converged: no net change in findings/scores.
+    if (signature === previousSignature) break;
+    previousSignature = signature;
+
+    // Fast exit: healthy result
+    if (grouped.critical.length === 0 && mergeReadiness >= 90) break;
+  }
+
+  return final;
+}
+
+function buildNextSteps(result, config) {
+  const nextSteps = [];
+  const { grouped, scores } = result;
+  const t = config.thresholds;
+
+  if (grouped.critical.length) nextSteps.push("Resolve all critical findings before merge.");
+  if (scores.engineering < t.engineering_warning) nextSteps.push("Reduce PR scope or split changes for faster, higher-quality review.");
+  if (scores.product < t.product_warning) nextSteps.push("Update PR description with problem statement, user impact, and acceptance criteria.");
+  if (scores.design < t.design_warning) nextSteps.push("Attach screenshots/UX notes for frontend-impacting changes.");
+  if (scores.security < t.security_warning) nextSteps.push("Request focused security review for sensitive changes.");
+  if (nextSteps.length === 0) nextSteps.push("PR quality signals look healthy. Proceed with standard reviewer assignment.");
+
+  return nextSteps;
+}
+
+function buildComment({ pr, result, nextSteps }) {
+  const fmt = (items, icon) => (items.length ? items.map((f) => `- ${icon} **${f.lens}**: ${f.message}`).join("\n") : "- None");
 
   return `${MARKER}
 ## ReviewOS Copilot Report
 
 **PR:** #${pr.number} - ${pr.title}
+**Loop iterations:** ${result.iteration}
 
-### Merge Readiness: **${mergeReadiness}/100**
+### Merge Readiness: **${result.mergeReadiness}/100**
 
 | Lens | Score |
 |---|---:|
-| Engineering | ${scores.engineering} |
-| Product | ${scores.product} |
-| Design | ${scores.design} |
-| Security | ${scores.security} |
+| Engineering | ${result.scores.engineering} |
+| Product | ${result.scores.product} |
+| Design | ${result.scores.design} |
+| Security | ${result.scores.security} |
 
 ### Findings
 
 **Critical**
-${fmt(grouped.critical, "🚨")}
+${fmt(result.grouped.critical, "🚨")}
 
 **Warnings**
-${fmt(grouped.warning, "⚠️")}
+${fmt(result.grouped.warning, "⚠️")}
 
 **Info**
-${fmt(grouped.info, "ℹ️")}
+${fmt(result.grouped.info, "ℹ️")}
 
 ### Recommended Next Steps
 ${nextSteps.map((s) => `- ${s}`).join("\n")}
@@ -213,72 +399,70 @@ async function upsertComment(owner, repo, issueNumber, token, body) {
   return { mode: "created", id: created.id };
 }
 
+function readMock(pathVar) {
+  if (!process.env[pathVar]) return null;
+  return JSON.parse(fs.readFileSync(process.env[pathVar], "utf8"));
+}
+
 async function main() {
-  const token = process.env.GITHUB_TOKEN;
   const eventPath = process.env.GITHUB_EVENT_PATH;
-  const repoSlug = process.env.GITHUB_REPOSITORY;
-  const failOnCritical = (process.env.FAIL_ON_CRITICAL || "false").toLowerCase() === "true";
+  const repoSlug = process.env.GITHUB_REPOSITORY || "local/review-os";
+  const token = process.env.GITHUB_TOKEN;
+  const config = loadConfig();
 
-  if (!token) throw new Error("Missing GITHUB_TOKEN");
-  if (!eventPath) throw new Error("Missing GITHUB_EVENT_PATH");
-  if (!repoSlug) throw new Error("Missing GITHUB_REPOSITORY");
+  const failOnCriticalEnv = process.env.FAIL_ON_CRITICAL;
+  const failOnCritical = failOnCriticalEnv ? failOnCriticalEnv.toLowerCase() === "true" : Boolean(config.fail_on_critical);
 
-  const event = JSON.parse(fs.readFileSync(eventPath, "utf8"));
-  const pull = event.pull_request;
-  if (!pull) {
-    console.log("No pull_request payload. Exiting.");
-    return;
+  const mockPr = readMock("MOCK_PR_PATH");
+  const mockFiles = readMock("MOCK_FILES_PATH");
+
+  let pr;
+  let files;
+
+  if (mockPr && mockFiles) {
+    pr = mockPr;
+    files = mockFiles;
+  } else {
+    if (!token) throw new Error("Missing GITHUB_TOKEN");
+    if (!eventPath) throw new Error("Missing GITHUB_EVENT_PATH");
+
+    const event = JSON.parse(fs.readFileSync(eventPath, "utf8"));
+    const pull = event.pull_request;
+    if (!pull) {
+      console.log("No pull_request payload. Exiting.");
+      return;
+    }
+
+    const [owner, repo] = repoSlug.split("/");
+    pr = await ghRequest(`https://api.github.com/repos/${owner}/${repo}/pulls/${pull.number}`, token);
+    files = await getAllFiles(owner, repo, pull.number, token);
   }
 
-  const [owner, repo] = repoSlug.split("/");
-  const pullNumber = pull.number;
+  const result = runAgentLoop({ pr, files, config, repoSlug });
+  const nextSteps = buildNextSteps(result, config);
+  const comment = buildComment({ pr, result, nextSteps });
 
-  const pr = await ghRequest(`https://api.github.com/repos/${owner}/${repo}/pulls/${pullNumber}`, token);
-  const files = await getAllFiles(owner, repo, pullNumber, token);
-  const body = pr.body || "";
+  const historyEntry = {
+    timestamp: new Date().toISOString(),
+    pr: pr.number,
+    mergeReadiness: result.mergeReadiness,
+    scores: result.scores,
+    findings: result.findings,
+  };
+  const historyFilePath = saveHistory(repoSlug, pr.number, historyEntry);
 
-  const eng = scoreEngineering(files, pr.additions || 0, pr.deletions || 0);
-  const prod = scoreProduct(body);
-  const des = scoreDesign(body, files);
-  const sec = scoreSecurity(files, eng);
+  if (process.env.DRY_RUN_COMMENT === "1" || mockPr) {
+    console.log(comment);
+    console.log(`History updated: ${historyFilePath}`);
+  } else {
+    const [owner, repo] = repoSlug.split("/");
+    const upsert = await upsertComment(owner, repo, pr.number, token, comment);
+    console.log(`Review comment ${upsert.mode}: ${upsert.id}`);
+    console.log(`History updated: ${historyFilePath}`);
+  }
 
-  const findings = [...eng.findings, ...prod.findings, ...des.findings, ...sec.findings];
-  const grouped = summarizeFindings(findings);
-
-  const mergeReadiness = Math.round(
-    eng.score * 0.35 +
-      prod.score * 0.25 +
-      des.score * 0.15 +
-      sec.score * 0.25
-  );
-
-  const nextSteps = [];
-  if (grouped.critical.length) nextSteps.push("Resolve all critical findings before merge.");
-  if (eng.score < 70) nextSteps.push("Reduce PR scope or split changes for faster, higher-quality review.");
-  if (prod.score < 70) nextSteps.push("Update PR description with problem statement, user impact, and acceptance criteria.");
-  if (des.score < 75) nextSteps.push("Attach screenshots/UX notes for frontend-impacting changes.");
-  if (sec.score < 75) nextSteps.push("Request focused security review for sensitive changes.");
-  if (nextSteps.length === 0) nextSteps.push("PR quality signals look healthy. Proceed with standard reviewer assignment.");
-
-  const comment = buildComment({
-    pr,
-    scores: {
-      engineering: eng.score,
-      product: prod.score,
-      design: des.score,
-      security: sec.score,
-    },
-    mergeReadiness,
-    grouped,
-    nextSteps,
-  });
-
-  const upsert = await upsertComment(owner, repo, pullNumber, token, comment);
-  console.log(`Review comment ${upsert.mode}: ${upsert.id}`);
-  console.log(`Merge readiness: ${mergeReadiness}`);
-
-  if (failOnCritical && grouped.critical.length > 0) {
-    console.error(`Critical findings present (${grouped.critical.length}). Failing job.`);
+  if (failOnCritical && result.grouped.critical.length > 0) {
+    console.error(`Critical findings present (${result.grouped.critical.length}). Failing job.`);
     process.exit(1);
   }
 }
