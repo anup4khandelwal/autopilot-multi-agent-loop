@@ -500,8 +500,8 @@ function collectCurrentReviewers(pr) {
   return { users, teams };
 }
 
-function computeMissingRequired(required, current) {
-  const missingUsers = required.users.filter((u) => !current.users.has(u));
+function computeMissingRequired(required, current, prAuthor = "") {
+  const missingUsers = required.users.filter((u) => u !== prAuthor && !current.users.has(u));
   const missingTeams = required.teams.filter((t) => {
     if (current.teams.has(t)) return false;
     const short = t.includes("/") ? t.split("/").at(-1) : t;
@@ -679,31 +679,34 @@ async function main() {
   const nextSteps = buildNextSteps(result, config);
 
   const codeownerRules = loadCodeowners();
+  const prAuthor = pr.user?.login || "";
   const reviewerRouting = {
     enabled: Boolean(config.reviewer_routing?.enabled),
     autoRequest: Boolean(config.reviewer_routing?.auto_request),
-    ...resolveReviewers(files, pr.user?.login || "", codeownerRules, Number(config.reviewer_routing?.max_reviewers) || 3),
+    ...resolveReviewers(files, prAuthor, codeownerRules, Number(config.reviewer_routing?.max_reviewers) || 3),
   };
 
   const required = result.requiredReviewers || { users: [], teams: [] };
   let currentCoverage = collectCurrentReviewers(pr);
   let requestedViaRequired = false;
 
-  let missingRequired = computeMissingRequired(required, currentCoverage);
+  let missingRequired = computeMissingRequired(required, currentCoverage, prAuthor);
   const shouldRequest = reviewerRouting.enabled && reviewerRouting.autoRequest && !mockPr;
   if (shouldRequest && (missingRequired.users.length || missingRequired.teams.length)) {
     const requestPayload = {
-      users: [...new Set([...reviewerRouting.users, ...missingRequired.users])],
+      users: [...new Set([...reviewerRouting.users, ...missingRequired.users])].filter((u) => u && u !== prAuthor),
       teams: [...new Set([...reviewerRouting.teams, ...missingRequired.teams])],
     };
-    const [owner, repo] = repoSlug.split("/");
-    await requestReviewers(owner, repo, pr.number, token, requestPayload);
-    requestedViaRequired = true;
-    currentCoverage = {
-      users: new Set([...currentCoverage.users, ...requestPayload.users]),
-      teams: new Set([...currentCoverage.teams, ...requestPayload.teams]),
-    };
-    missingRequired = computeMissingRequired(required, currentCoverage);
+    if (requestPayload.users.length || requestPayload.teams.length) {
+      const [owner, repo] = repoSlug.split("/");
+      await requestReviewers(owner, repo, pr.number, token, requestPayload);
+      requestedViaRequired = true;
+      currentCoverage = {
+        users: new Set([...currentCoverage.users, ...requestPayload.users]),
+        teams: new Set([...currentCoverage.teams, ...requestPayload.teams]),
+      };
+    }
+    missingRequired = computeMissingRequired(required, currentCoverage, prAuthor);
   }
 
   if (missingRequired.users.length || missingRequired.teams.length) {

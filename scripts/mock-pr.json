@@ -1,5 +1,8 @@
 {
   "number": 42,
   "title": "Add auth middleware and update dashboard UI",
-  "body": "Problem: login sessions expire unexpectedly for active users.\n\nUser Impact: users can remain authenticated while active.\n\nAcceptance Criteria: successful session refresh and dashboard keeps state."
+  "body": "Problem: login sessions expire unexpectedly for active users.\n\nUser Impact: users can remain authenticated while active.\n\nAcceptance Criteria: successful session refresh and dashboard keeps state.",
+  "user": { "login": "anup4khandelwal" },
+  "requested_reviewers": [],
+  "requested_teams": []
 }
