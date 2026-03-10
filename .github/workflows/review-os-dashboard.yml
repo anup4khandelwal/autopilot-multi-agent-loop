@@ -1,0 +1,25 @@
+name: review-os-dashboard
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  build-dashboard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build dashboard
+        run: node scripts/build-dashboard.mjs
+
+      - name: Upload dashboard artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: reviewos-dashboard-${{ github.run_id }}
+          path: docs/review-dashboard.md

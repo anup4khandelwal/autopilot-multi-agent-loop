@@ -13,3 +13,8 @@ thresholds:
 
 max_iterations: 3
 fail_on_critical: true
+
+reviewer_routing:
+  enabled: true
+  auto_request: false
+  max_reviewers: 3

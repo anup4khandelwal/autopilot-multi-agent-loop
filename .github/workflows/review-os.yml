@@ -30,10 +30,22 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node src/review.mjs
 
+      - name: Build review dashboard
+        if: always()
+        run: node scripts/build-dashboard.mjs
+
       - name: Upload Review Memory
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: reviewos-history-${{ github.run_id }}
           path: .reviewos/history
+          if-no-files-found: ignore
+
+      - name: Upload Dashboard
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reviewos-dashboard-${{ github.run_id }}
+          path: docs/review-dashboard.md
           if-no-files-found: ignore

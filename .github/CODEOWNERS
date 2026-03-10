@@ -1,0 +1,9 @@
+# Default owner
+* @anup4khandelwal
+
+# Security-sensitive paths
+src/auth/* @anup4khandelwal
+.github/workflows/* @anup4khandelwal
+
+# Core engine
+src/review.mjs @anup4khandelwal

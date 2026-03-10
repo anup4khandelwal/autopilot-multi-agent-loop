@@ -36,12 +36,22 @@ function loadConfig(configPath = ".reviewos.yml") {
     },
     max_iterations: 3,
     fail_on_critical: true,
+    reviewer_routing: {
+      enabled: true,
+      auto_request: false,
+      max_reviewers: 3,
+    },
   };
 
   if (!fs.existsSync(configPath)) return defaults;
 
   const data = fs.readFileSync(configPath, "utf8").split(/\r?\n/);
-  const parsed = { ...defaults, weights: { ...defaults.weights }, thresholds: { ...defaults.thresholds } };
+  const parsed = {
+    ...defaults,
+    weights: { ...defaults.weights },
+    thresholds: { ...defaults.thresholds },
+    reviewer_routing: { ...defaults.reviewer_routing },
+  };
 
   let section = null;
   for (const rawLine of data) {
@@ -286,15 +296,83 @@ function runAgentLoop({ pr, files, config, repoSlug }) {
       history,
     };
 
-    // Converged: no net change in findings/scores.
     if (signature === previousSignature) break;
     previousSignature = signature;
 
-    // Fast exit: healthy result
     if (grouped.critical.length === 0 && mergeReadiness >= 90) break;
   }
 
   return final;
+}
+
+function loadCodeowners(codeownersPath = ".github/CODEOWNERS") {
+  if (!fs.existsSync(codeownersPath)) return [];
+  const lines = fs.readFileSync(codeownersPath, "utf8").split(/\r?\n/);
+  const rules = [];
+
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const parts = line.split(/\s+/).filter(Boolean);
+    if (parts.length < 2) continue;
+    const pattern = parts[0];
+    const owners = parts.slice(1);
+    rules.push({ pattern, owners });
+  }
+
+  return rules;
+}
+
+function escapeRegex(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function patternToRegex(pattern) {
+  let p = pattern.trim();
+  if (p.startsWith("/")) p = p.slice(1);
+  if (p.endsWith("/")) p += "**";
+
+  const hasSlash = p.includes("/");
+  const placeholder = "__DS__";
+  let rx = escapeRegex(p).replace(/\*\*/g, placeholder).replace(/\*/g, "[^/]*").replace(new RegExp(placeholder, "g"), ".*");
+
+  if (!hasSlash) {
+    rx = `(?:^|.*/)${rx}$`;
+  } else {
+    rx = `^${rx}$`;
+  }
+
+  return new RegExp(rx);
+}
+
+function resolveReviewers(files, prAuthor, codeownerRules, maxReviewers = 3) {
+  if (codeownerRules.length === 0) return { users: [], teams: [] };
+
+  const users = new Set();
+  const teams = new Set();
+
+  for (const file of files) {
+    let matchedOwners = [];
+    for (const rule of codeownerRules) {
+      const regex = patternToRegex(rule.pattern);
+      if (regex.test(file.filename)) matchedOwners = rule.owners;
+    }
+
+    for (const owner of matchedOwners) {
+      if (!owner.startsWith("@")) continue;
+      const normalized = owner.slice(1);
+      if (!normalized) continue;
+      if (normalized.includes("/")) {
+        teams.add(normalized);
+      } else if (normalized !== prAuthor) {
+        users.add(normalized);
+      }
+    }
+  }
+
+  const sortedUsers = [...users].sort().slice(0, Math.max(0, maxReviewers));
+  const sortedTeams = [...teams].sort().slice(0, Math.max(0, maxReviewers));
+  return { users: sortedUsers, teams: sortedTeams };
 }
 
 function buildNextSteps(result, config) {
@@ -312,8 +390,12 @@ function buildNextSteps(result, config) {
   return nextSteps;
 }
 
-function buildComment({ pr, result, nextSteps }) {
+function buildComment({ pr, result, nextSteps, reviewerRouting }) {
   const fmt = (items, icon) => (items.length ? items.map((f) => `- ${icon} **${f.lens}**: ${f.message}`).join("\n") : "- None");
+
+  const reviewersSection = reviewerRouting.enabled
+    ? `### Suggested Reviewers (CODEOWNERS)\n- Users: ${reviewerRouting.users.length ? reviewerRouting.users.map((u) => `@${u}`).join(", ") : "None"}\n- Teams: ${reviewerRouting.teams.length ? reviewerRouting.teams.map((t) => `@${t}`).join(", ") : "None"}`
+    : "### Suggested Reviewers (CODEOWNERS)\n- Reviewer routing disabled by config.";
 
   return `${MARKER}
 ## ReviewOS Copilot Report
@@ -329,6 +411,8 @@ function buildComment({ pr, result, nextSteps }) {
 | Product | ${result.scores.product} |
 | Design | ${result.scores.design} |
 | Security | ${result.scores.security} |
+
+${reviewersSection}
 
 ### Findings
 
@@ -399,6 +483,18 @@ async function upsertComment(owner, repo, issueNumber, token, body) {
   return { mode: "created", id: created.id };
 }
 
+async function requestReviewers(owner, repo, pullNumber, token, reviewerRouting) {
+  if (reviewerRouting.users.length === 0 && reviewerRouting.teams.length === 0) return null;
+
+  return ghRequest(`https://api.github.com/repos/${owner}/${repo}/pulls/${pullNumber}/requested_reviewers`, token, {
+    method: "POST",
+    body: JSON.stringify({
+      reviewers: reviewerRouting.users,
+      team_reviewers: reviewerRouting.teams,
+    }),
+  });
+}
+
 function readMock(pathVar) {
   if (!process.env[pathVar]) return null;
   return JSON.parse(fs.readFileSync(process.env[pathVar], "utf8"));
@@ -440,7 +536,15 @@ async function main() {
 
   const result = runAgentLoop({ pr, files, config, repoSlug });
   const nextSteps = buildNextSteps(result, config);
-  const comment = buildComment({ pr, result, nextSteps });
+
+  const codeownerRules = loadCodeowners();
+  const reviewerRouting = {
+    enabled: Boolean(config.reviewer_routing?.enabled),
+    autoRequest: Boolean(config.reviewer_routing?.auto_request),
+    ...resolveReviewers(files, pr.user?.login || "", codeownerRules, Number(config.reviewer_routing?.max_reviewers) || 3),
+  };
+
+  const comment = buildComment({ pr, result, nextSteps, reviewerRouting });
 
   const historyEntry = {
     timestamp: new Date().toISOString(),
@@ -454,10 +558,18 @@ async function main() {
   if (process.env.DRY_RUN_COMMENT === "1" || mockPr) {
     console.log(comment);
     console.log(`History updated: ${historyFilePath}`);
+    console.log(`Suggested users: ${reviewerRouting.users.join(",") || "none"}`);
+    console.log(`Suggested teams: ${reviewerRouting.teams.join(",") || "none"}`);
   } else {
     const [owner, repo] = repoSlug.split("/");
     const upsert = await upsertComment(owner, repo, pr.number, token, comment);
     console.log(`Review comment ${upsert.mode}: ${upsert.id}`);
+
+    if (reviewerRouting.enabled && reviewerRouting.autoRequest) {
+      await requestReviewers(owner, repo, pr.number, token, reviewerRouting);
+      console.log("Requested reviewers via GitHub API.");
+    }
+
     console.log(`History updated: ${historyFilePath}`);
   }
 
