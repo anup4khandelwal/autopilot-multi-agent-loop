@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.1.5
+
+- Added actionable fix suggestions in ReviewOS PR comments
+- Added reviewer SLA reminder automation with cooldown-aware reminder upserts
+- Added multi-repo baseline compare output in dashboard and CSV
+- Added prompt trace capture per lens in `.reviewos/traces`
+- Added release gate enforcement for release PRs with unresolved critical findings
+
 ## v0.1.4
 
 - Added risk-based reviewer routing with ranked CODEOWNERS suggestions

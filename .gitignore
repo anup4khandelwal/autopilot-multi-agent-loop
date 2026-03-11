@@ -5,4 +5,5 @@ node_modules/
 .reviewos/last-report.json
 .reviewos/security-findings.sarif
 .reviewos/alerts-state.json
+.reviewos/traces/*.json
 site/

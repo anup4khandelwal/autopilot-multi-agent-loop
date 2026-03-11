@@ -4,6 +4,7 @@ import path from "node:path";
 const HISTORY_DIR = ".reviewos/history";
 const OUTPUT = "docs/review-dashboard.md";
 const OUTPUT_CSV = "docs/review-dashboard.csv";
+const OUTPUT_REPO_CSV = "docs/repo-baseline.csv";
 
 function ensureDir(dirPath) {
   fs.mkdirSync(dirPath, { recursive: true });
@@ -39,6 +40,13 @@ function collectRuns() {
   }
 
   return runs.sort((a, b) => String(a.timestamp).localeCompare(String(b.timestamp)));
+}
+
+function parseRepoFromSource(source) {
+  const s = String(source || "");
+  const match = s.match(/^(.*?)__pr-\d+\.json$/);
+  if (!match) return "unknown/repo";
+  return match[1].replace(/__/g, "/");
 }
 
 function findingKey(f) {
@@ -191,6 +199,34 @@ function buildDashboard(runs) {
       });
     }
   }
+  const repos = new Map();
+  for (const r of runs) {
+    const repo = parseRepoFromSource(r._source);
+    if (!repos.has(repo)) {
+      repos.set(repo, {
+        runs: 0,
+        readiness: [],
+        critical: 0,
+        warning: 0,
+      });
+    }
+    const row = repos.get(repo);
+    row.runs += 1;
+    row.readiness.push(Number(r.mergeReadiness || 0));
+    for (const f of r.findings || []) {
+      if (f.severity === "critical") row.critical += 1;
+      if (f.severity === "warning") row.warning += 1;
+    }
+  }
+  const repoRows = [...repos.entries()]
+    .map(([repo, data]) => ({
+      repo,
+      runs: data.runs,
+      readinessAvg: avg(data.readiness),
+      critical: data.critical,
+      warning: data.warning,
+    }))
+    .sort((a, b) => b.readinessAvg - a.readinessAvg);
 
   return `# ReviewOS Trend Dashboard
 
@@ -239,6 +275,10 @@ ${readinessBars || "No data yet."}
 
 ${anomalies.length ? buildTable(["Timestamp", "PR", "Baseline", "Current", "Drop"], anomalies.slice(-8).reverse().map((a) => [String(a.timestamp).slice(0, 19), String(a.pr), a.baseline.toFixed(1), a.current.toFixed(1), a.drop.toFixed(1)])) : "No anomalies detected."}
 
+## Multi-Repo Baseline Compare
+
+${repoRows.length ? buildTable(["Repository", "Runs", "Avg Readiness", "Critical Findings", "Warnings"], repoRows.map((r) => [r.repo, String(r.runs), r.readinessAvg.toFixed(1), String(r.critical), String(r.warning)])) : "No repository baseline data yet."}
+
 ## Critical by Path Policy Rule
 
 ${buildTable(["Rule", "Critical Count"], topCriticalPaths.map(([rule, count]) => [rule, String(count)]))}
@@ -252,7 +292,29 @@ ${topFindings.length ? buildTable(["Severity", "Lens", "Count", "Finding"], topF
 - Data source: \.reviewos/history/*.json
 - This dashboard summarizes historical review runs across PRs.
 - CSV export: \`${OUTPUT_CSV}\`
+- Repo baseline CSV: \`${OUTPUT_REPO_CSV}\`
 `;
+}
+
+function writeRepoCsv(runs) {
+  const repos = new Map();
+  for (const r of runs) {
+    const repo = parseRepoFromSource(r._source);
+    if (!repos.has(repo)) repos.set(repo, { runs: 0, readiness: [], critical: 0, warning: 0, info: 0 });
+    const row = repos.get(repo);
+    row.runs += 1;
+    row.readiness.push(Number(r.mergeReadiness || 0));
+    for (const f of r.findings || []) {
+      if (f.severity === "critical") row.critical += 1;
+      else if (f.severity === "warning") row.warning += 1;
+      else row.info += 1;
+    }
+  }
+  const lines = ["repository,runs,avg_readiness,critical,warning,info"];
+  for (const [repo, data] of repos.entries()) {
+    lines.push(`${repo},${data.runs},${avg(data.readiness).toFixed(1)},${data.critical},${data.warning},${data.info}`);
+  }
+  fs.writeFileSync(OUTPUT_REPO_CSV, `${lines.join("\n")}\n`);
 }
 
 function main() {
@@ -261,8 +323,10 @@ function main() {
   const content = buildDashboard(runs);
   fs.writeFileSync(OUTPUT, content);
   writeCsv(runs);
+  writeRepoCsv(runs);
   console.log(`Dashboard written: ${OUTPUT}`);
   console.log(`Dashboard CSV written: ${OUTPUT_CSV}`);
+  console.log(`Repo baseline CSV written: ${OUTPUT_REPO_CSV}`);
   console.log(`Runs analyzed: ${runs.length}`);
 }
 

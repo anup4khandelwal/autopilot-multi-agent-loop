@@ -21,4 +21,17 @@ fi
 echo "[3/3] Running path policy matrix..."
 node scripts/policy-matrix-test.mjs
 
+echo "[4/6] Syntax checks..."
+node --check src/review.mjs
+node --check src/release-gate.mjs
+node --check src/sla-reminder.mjs
+
+echo "[5/6] Build dashboard outputs..."
+node scripts/build-dashboard.mjs >/tmp/reviewos-dashboard.log
+test -f docs/review-dashboard.csv
+test -f docs/repo-baseline.csv
+
+echo "[6/6] Render dashboard site..."
+node scripts/render-dashboard-site.mjs >/tmp/reviewos-site.log
+
 echo "Validation complete."

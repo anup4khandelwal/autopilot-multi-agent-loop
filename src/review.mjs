@@ -3,8 +3,10 @@ import path from "node:path";
 import crypto from "node:crypto";
 
 const MARKER = "<!-- review-os:pr-review -->";
+const SLA_MARKER = "<!-- review-os:sla-reminder -->";
 const HISTORY_DIR = ".reviewos/history";
 const REPORT_PATH = ".reviewos/last-report.json";
+const TRACE_DIR = ".reviewos/traces";
 
 function clamp(v, min = 0, max = 100) {
   return Math.max(min, Math.min(max, v));
@@ -127,6 +129,15 @@ function loadConfig(configPath = ".reviewos.yml") {
       security_label: "reviewos:security",
       ready_label: "reviewos:ready",
     },
+    fix_suggestions: {
+      enabled: true,
+      max_items: 3,
+    },
+    reviewer_sla: {
+      enabled: false,
+      threshold_hours: 24,
+      cooldown_hours: 12,
+    },
     alerts: {
       enabled: false,
       slack_webhook_env: "SLACK_WEBHOOK_URL",
@@ -142,6 +153,15 @@ function loadConfig(configPath = ".reviewos.yml") {
       signature: "",
       signature_secret_env: "REVIEW_OS_SIGNATURE_SECRET",
     },
+    prompt_trace: {
+      enabled: true,
+      output_dir: TRACE_DIR,
+    },
+    release_gate: {
+      enabled: true,
+      title_regex: "^release[:\\s]|^chore\\(release\\):",
+      base_branch_regex: "^main$|^release\\/.*$",
+    },
     path_overrides: {},
   };
 
@@ -154,7 +174,11 @@ function loadConfig(configPath = ".reviewos.yml") {
     thresholds: { ...defaults.thresholds },
     reviewer_routing: { ...defaults.reviewer_routing },
     labels: { ...defaults.labels },
+    fix_suggestions: { ...defaults.fix_suggestions },
+    reviewer_sla: { ...defaults.reviewer_sla },
     alerts: { ...defaults.alerts },
+    prompt_trace: { ...defaults.prompt_trace },
+    release_gate: { ...defaults.release_gate },
     path_overrides: { ...defaults.path_overrides },
   };
 
@@ -255,9 +279,13 @@ function loadConfig(configPath = ".reviewos.yml") {
 function scoreProduct(body) {
   let score = 100;
   const findings = [];
+  const trace = [];
   const hasProblem = containsAny(body, ["problem", "pain", "why", "context"]);
   const hasImpact = containsAny(body, ["user impact", "customer", "who is affected", "persona"]);
   const hasAcceptance = containsAny(body, ["acceptance criteria", "definition of done", "success metric", "done when"]);
+  trace.push({ check: "problem_context", pass: hasProblem, detail: "PR includes problem/context statement." });
+  trace.push({ check: "user_impact", pass: hasImpact, detail: "PR includes user/business impact." });
+  trace.push({ check: "acceptance_criteria", pass: hasAcceptance, detail: "PR includes acceptance criteria or success metric." });
 
   if (!hasProblem) {
     score -= 25;
@@ -272,30 +300,33 @@ function scoreProduct(body) {
     findings.push({ severity: "warning", lens: "Product", message: "PR description lacks acceptance criteria or success metrics." });
   }
 
-  return { score: clamp(score), findings };
+  return { score: clamp(score), findings, trace };
 }
 
 function scoreDesign(body, files) {
   let score = 100;
   const findings = [];
+  const trace = [];
   const frontendTouched = files.some(
     (f) => /(^|\/)(src|app|web|frontend|ui|components|pages)\//i.test(f.filename) || /\.(tsx|jsx|css|scss|vue)$/.test(f.filename)
   );
 
   if (frontendTouched) {
     const hasEvidence = containsAny(body, ["screenshot", "recording", "figma", "ux", "ui", ".png", ".jpg", ".gif"]);
+    trace.push({ check: "frontend_ui_evidence", pass: hasEvidence, detail: "Frontend changes include screenshot/UX evidence." });
     if (!hasEvidence) {
       score -= 30;
       findings.push({ severity: "warning", lens: "Design", message: "Frontend changes detected without UI evidence (screenshots/UX notes)." });
     }
   }
 
-  return { score: clamp(score), findings };
+  return { score: clamp(score), findings, trace };
 }
 
 function scoreEngineering(files, additions, deletions) {
   let score = 100;
   const findings = [];
+  const trace = [];
   const changed = files.length;
   const delta = additions + deletions;
 
@@ -314,6 +345,9 @@ function scoreEngineering(files, additions, deletions) {
 
   const riskyPatterns = [/migrations?\//i, /schema/i, /auth|oauth|jwt|session|permission/i, /payment|billing|invoice/i, /\.github\/workflows\//i, /dockerfile|k8s|terraform|helm/i];
   const risky = files.filter((f) => riskyPatterns.some((r) => r.test(f.filename)));
+  trace.push({ check: "pr_size", pass: changed <= 30, detail: `Files changed: ${changed}` });
+  trace.push({ check: "diff_volume", pass: delta <= 1200, detail: `Line delta: ${delta}` });
+  trace.push({ check: "risk_sensitive_files", pass: risky.length === 0, detail: `Risk-sensitive files: ${risky.length}` });
 
   if (risky.length > 0) {
     score -= Math.min(20, risky.length * 4);
@@ -330,15 +364,19 @@ function scoreEngineering(files, additions, deletions) {
   } else {
     score += 5;
   }
+  trace.push({ check: "test_updates_present", pass: hasTests, detail: "PR includes test changes." });
 
-  return { score: clamp(score), findings, hasTests, riskyCount: risky.length };
+  return { score: clamp(score), findings, hasTests, riskyCount: risky.length, trace };
 }
 
 function scoreSecurity(files, engineering) {
   let score = 100;
   const findings = [];
+  const trace = [];
 
   const sensitive = files.filter((f) => /auth|oauth|jwt|session|permission|secret|token|payment|billing|infra|k8s|terraform|workflow/i.test(f.filename));
+  trace.push({ check: "sensitive_domain_changes", pass: sensitive.length === 0, detail: `Sensitive files touched: ${sensitive.length}` });
+  trace.push({ check: "tests_with_sensitive_changes", pass: sensitive.length === 0 || engineering.hasTests, detail: `Tests present: ${engineering.hasTests}` });
 
   if (sensitive.length > 0) {
     score -= Math.min(35, sensitive.length * 6);
@@ -350,7 +388,7 @@ function scoreSecurity(files, engineering) {
     findings.push({ severity: "critical", lens: "Security", message: "Sensitive changes detected without test updates." });
   }
 
-  return { score: clamp(score), findings };
+  return { score: clamp(score), findings, trace };
 }
 
 function dedupeFindings(findings) {
@@ -544,6 +582,13 @@ function runAgentLoop({ pr, files, config, repoSlug }) {
       requiredReviewers: override.required,
       matchedPathRules: override.matchedRules,
       delta,
+      traces: {
+        engineering: eng.trace || [],
+        product: product.trace || [],
+        design: design.trace || [],
+        security: security.trace || [],
+        pathPolicy: (override.matchedRules || []).map((r) => ({ check: "matched_path_rule", pass: false, detail: `${r.name} (${r.count})` })),
+      },
     };
 
     if (signature === previousSignature) break;
@@ -739,6 +784,63 @@ function computeMissingRequired(required, current, prAuthor = "") {
   return { users: missingUsers, teams: missingTeams };
 }
 
+function isReleasePr(pr, config) {
+  const title = String(pr.title || "");
+  const baseRef = String(pr.base?.ref || "");
+  const titleRegex = new RegExp(String(config.release_gate?.title_regex || "^release[:\\s]|^chore\\(release\\):"), "i");
+  const baseRegex = new RegExp(String(config.release_gate?.base_branch_regex || "^main$|^release\\/.*$"), "i");
+  return titleRegex.test(title) || baseRegex.test(baseRef);
+}
+
+function buildFixSuggestions(result, files, config) {
+  if (!config.fix_suggestions?.enabled) return [];
+  const maxItems = Math.max(1, Number(config.fix_suggestions?.max_items || 3));
+  const suggestions = [];
+  const critical = result.grouped?.critical || [];
+  const warnings = result.grouped?.warning || [];
+  const pool = [...critical, ...warnings];
+
+  for (const finding of pool) {
+    if (suggestions.length >= maxItems) break;
+    if (/without test updates|No test file changes detected|requires test updates/i.test(finding.message)) {
+      suggestions.push({
+        title: "Add focused tests",
+        patch: "diff --git a/src/module.test.ts b/src/module.test.ts\n+it('covers the changed path', async () => {\n+  // Arrange, Act, Assert\n+});",
+      });
+      continue;
+    }
+    if (/lacks a clear problem|lacks explicit user\/business impact|acceptance criteria/i.test(finding.message)) {
+      suggestions.push({
+        title: "Improve PR description quality",
+        patch: "### Problem\n- What user pain is solved?\n\n### Impact\n- Who is affected and expected outcome\n\n### Acceptance Criteria\n- [ ] measurable done condition",
+      });
+      continue;
+    }
+    if (/Frontend changes detected without UI evidence/i.test(finding.message)) {
+      suggestions.push({
+        title: "Attach UI proof",
+        patch: "Add screenshots or short recording to PR body:\n- Before\n- After\n- Edge-case states",
+      });
+      continue;
+    }
+    if (/Missing required reviewer coverage/i.test(finding.message)) {
+      suggestions.push({
+        title: "Add required reviewers",
+        patch: "Use PR sidebar -> Reviewers and add required users/teams from path policy rules.",
+      });
+    }
+  }
+
+  if (suggestions.length === 0 && files.some((f) => /auth|payment|workflow/i.test(f.filename))) {
+    suggestions.push({
+      title: "Harden sensitive-path changes",
+      patch: "Add tests + explicit risk notes in PR body for auth/payment/workflow changes.",
+    });
+  }
+
+  return suggestions.slice(0, maxItems);
+}
+
 function buildNextSteps(result, config) {
   const nextSteps = [];
   const { grouped, scores } = result;
@@ -754,7 +856,7 @@ function buildNextSteps(result, config) {
   return nextSteps;
 }
 
-function buildComment({ pr, result, nextSteps, reviewerRouting, requiredCoverage }) {
+function buildComment({ pr, result, nextSteps, reviewerRouting, requiredCoverage, fixSuggestions = [] }) {
   const fmt = (items, icon) => (items.length ? items.map((f) => `- ${icon} **${f.lens}**: ${f.message}`).join("\n") : "- None");
 
   const reviewersSection = reviewerRouting.enabled
@@ -767,6 +869,9 @@ function buildComment({ pr, result, nextSteps, reviewerRouting, requiredCoverage
 
   const deltaSection = result.delta
     ? `### Delta Since Previous Run\n- Added findings: ${result.delta.added.length}\n- Resolved findings: ${result.delta.resolved.length}`
+    : "";
+  const fixSection = fixSuggestions.length
+    ? `### Actionable Fix Suggestions\n${fixSuggestions.map((s) => `- **${s.title}**\n\n\`\`\`text\n${s.patch}\n\`\`\``).join("\n")}`
     : "";
 
   return `${MARKER}
@@ -789,6 +894,8 @@ ${reviewersSection}
 ${requiredSection}
 
 ${deltaSection}
+
+${fixSection}
 
 ### Findings
 
@@ -859,6 +966,33 @@ async function upsertComment(owner, repo, issueNumber, token, body) {
   return { mode: "created", id: created.id };
 }
 
+async function upsertSlaReminderComment(owner, repo, issueNumber, token, body, cooldownHours = 12) {
+  const comments = await ghRequest(`https://api.github.com/repos/${owner}/${repo}/issues/${issueNumber}/comments?per_page=100`, token);
+  const existing = comments.find((c) => c.body && c.body.includes(SLA_MARKER));
+  if (!existing) {
+    const created = await ghRequest(`https://api.github.com/repos/${owner}/${repo}/issues/${issueNumber}/comments`, token, {
+      method: "POST",
+      body: JSON.stringify({ body: `${SLA_MARKER}\n${body}` }),
+    });
+    return { mode: "created", id: created.id };
+  }
+
+  const updatedAt = new Date(existing.updated_at || existing.created_at || 0).getTime();
+  const ageMs = Date.now() - updatedAt;
+  const cooldownMs = Math.max(0, Number(cooldownHours || 12)) * 60 * 60 * 1000;
+  if (ageMs < cooldownMs) return { mode: "cooldown", id: existing.id };
+
+  await ghRequest(`https://api.github.com/repos/${owner}/${repo}/issues/comments/${existing.id}`, token, {
+    method: "PATCH",
+    body: JSON.stringify({ body: `${SLA_MARKER}\n${body}` }),
+  });
+  return { mode: "updated", id: existing.id };
+}
+
+async function getPullReviews(owner, repo, pullNumber, token) {
+  return ghRequest(`https://api.github.com/repos/${owner}/${repo}/pulls/${pullNumber}/reviews?per_page=100`, token);
+}
+
 async function syncManagedLabels(owner, repo, issueNumber, token, desiredLabels, managedLabels) {
   const current = await ghRequest(`https://api.github.com/repos/${owner}/${repo}/issues/${issueNumber}/labels`, token);
   const currentNames = new Set((current || []).map((l) => l.name));
@@ -903,7 +1037,7 @@ function writeSarifReport(repoSlug, pr, result) {
         tool: {
           driver: {
             name: "review-os",
-            version: "0.1.4",
+            version: "0.1.5",
             informationUri: "https://github.com/anup4khandelwal/autopilot-multi-agent-loop",
             rules: findings.map((f, idx) => ({
               id: `reviewos-${idx + 1}`,
@@ -1060,6 +1194,23 @@ function writeStepSummary({ pr, result, nextSteps, reviewerRouting, requiredCove
   fs.appendFileSync(summaryPath, `${lines.join("\n")}\n`);
 }
 
+function writePromptTrace({ config, repoSlug, pr, traces, result }) {
+  if (!config.prompt_trace?.enabled) return null;
+  const dir = String(config.prompt_trace?.output_dir || TRACE_DIR);
+  ensureDir(dir);
+  const safeRepo = repoSlug.replace(/\//g, "__");
+  const out = path.join(dir, `${safeRepo}__pr-${pr.number}.json`);
+  const payload = {
+    timestamp: new Date().toISOString(),
+    repository: repoSlug,
+    pr: { number: pr.number, title: pr.title },
+    mergeReadiness: result.mergeReadiness,
+    traces,
+  };
+  fs.writeFileSync(out, JSON.stringify(payload, null, 2));
+  return out;
+}
+
 function readMock(pathVar) {
   if (!process.env[pathVar]) return null;
   return JSON.parse(fs.readFileSync(process.env[pathVar], "utf8"));
@@ -1081,10 +1232,12 @@ async function main() {
 
   let pr;
   let files;
+  let reviews = [];
 
   if (mockPr && mockFiles) {
     pr = mockPr;
     files = mockFiles;
+    reviews = Array.isArray(pr.reviews) ? pr.reviews : [];
   } else {
     if (!token) throw new Error("Missing GITHUB_TOKEN");
     if (!eventPath) throw new Error("Missing GITHUB_EVENT_PATH");
@@ -1099,10 +1252,12 @@ async function main() {
     const [owner, repo] = repoSlug.split("/");
     pr = await ghRequest(`https://api.github.com/repos/${owner}/${repo}/pulls/${pull.number}`, token);
     files = await getAllFiles(owner, repo, pull.number, token);
+    reviews = await getPullReviews(owner, repo, pull.number, token);
   }
 
   const result = runAgentLoop({ pr, files, config, repoSlug });
   const nextSteps = buildNextSteps(result, config);
+  const fixSuggestions = buildFixSuggestions(result, files, config);
 
   const codeownerRules = loadCodeowners();
   const prAuthor = pr.user?.login || "";
@@ -1164,8 +1319,11 @@ async function main() {
     missing: missingRequired,
   };
 
-  const comment = buildComment({ pr, result, nextSteps, reviewerRouting, requiredCoverage });
+  const comment = buildComment({ pr, result, nextSteps, reviewerRouting, requiredCoverage, fixSuggestions });
   const autoRequestAttempted = reviewerRouting.enabled && reviewerRouting.autoRequest;
+  const approvedByReviewer = (reviews || []).some((r) => String(r.state || "").toUpperCase() === "APPROVED");
+  const prAgeHours = pr.created_at ? Math.max(0, (Date.now() - new Date(pr.created_at).getTime()) / (1000 * 60 * 60)) : 0;
+  const slaExceeded = config.reviewer_sla?.enabled && !approvedByReviewer && prAgeHours >= Number(config.reviewer_sla?.threshold_hours || 24);
 
   const historyEntry = {
     timestamp: new Date().toISOString(),
@@ -1184,7 +1342,24 @@ async function main() {
       matchedRules: result.matchedPathRules || [],
     },
     delta: result.delta || { added: [], resolved: [] },
+    promptTracePath: "",
+    sla: {
+      enabled: Boolean(config.reviewer_sla?.enabled),
+      approvedByReviewer,
+      prAgeHours: Number(prAgeHours.toFixed(2)),
+      exceeded: Boolean(slaExceeded),
+    },
   };
+  if (result.traces) {
+    const tracePath = writePromptTrace({
+      config,
+      repoSlug,
+      pr,
+      traces: result.traces,
+      result,
+    });
+    historyEntry.promptTracePath = tracePath || "";
+  }
 
   ensureDir(path.dirname(REPORT_PATH));
   fs.writeFileSync(
@@ -1207,6 +1382,8 @@ async function main() {
         },
         requiredCoverage,
         matchedPathRules: result.matchedPathRules || [],
+        fixSuggestions,
+        promptTracePath: historyEntry.promptTracePath,
       },
       null,
       2
@@ -1236,6 +1413,26 @@ async function main() {
 
     console.log(`History updated: ${historyFilePath}`);
 
+    if (slaExceeded) {
+      const [owner, repo] = repoSlug.split("/");
+      const slaBody = [
+        "## Review SLA Reminder",
+        "",
+        `- PR has been waiting **${prAgeHours.toFixed(1)}h** without approval.`,
+        `- Threshold: **${Number(config.reviewer_sla?.threshold_hours || 24)}h**`,
+        "- Please assign/reassign reviewers or request help from maintainers.",
+      ].join("\n");
+      const reminder = await upsertSlaReminderComment(
+        owner,
+        repo,
+        pr.number,
+        token,
+        slaBody,
+        Number(config.reviewer_sla?.cooldown_hours || 12)
+      );
+      console.log(`SLA reminder comment: ${reminder.mode}`);
+    }
+
     if (config.labels?.enabled) {
       const managedLabels = [
         String(config.labels.critical_label || "reviewos:critical"),
@@ -1258,6 +1455,9 @@ async function main() {
 
   const sarifPath = writeSarifReport(repoSlug, pr, result);
   console.log(`SARIF written: ${sarifPath}`);
+  if (historyEntry.promptTracePath) {
+    console.log(`Prompt trace written: ${historyEntry.promptTracePath}`);
+  }
 
   writeStepSummary({
     pr,
@@ -1270,6 +1470,11 @@ async function main() {
 
   if (failOnCritical && result.grouped.critical.length > 0) {
     console.error(`Critical findings present (${result.grouped.critical.length}). Failing job.`);
+    process.exit(1);
+  }
+
+  if (config.release_gate?.enabled && isReleasePr(pr, config) && result.grouped.critical.length > 0) {
+    console.error("Release gate blocked: unresolved critical findings on release PR.");
     process.exit(1);
   }
 }

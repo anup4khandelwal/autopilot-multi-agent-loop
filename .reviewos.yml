@@ -27,6 +27,15 @@ labels:
   security_label: reviewos:security
   ready_label: reviewos:ready
 
+fix_suggestions:
+  enabled: true
+  max_items: 3
+
+reviewer_sla:
+  enabled: true
+  threshold_hours: 24
+  cooldown_hours: 12
+
 alerts:
   enabled: false
   slack_webhook_env: SLACK_WEBHOOK_URL
@@ -45,6 +54,15 @@ governance:
   expected_sha256: ""
   signature: ""
   signature_secret_env: REVIEW_OS_SIGNATURE_SECRET
+
+prompt_trace:
+  enabled: true
+  output_dir: .reviewos/traces
+
+release_gate:
+  enabled: true
+  title_regex: "^release[:\\s]|^chore\\(release\\):"
+  base_branch_regex: "^main$|^release\\/.*$"
 
 path_overrides:
   auth_paths:

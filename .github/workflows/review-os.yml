@@ -33,6 +33,10 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: node src/review.mjs
 
+      - name: Enforce release gate
+        if: always()
+        run: node src/release-gate.mjs
+
       - name: Build review dashboard
         if: always()
         run: node scripts/build-dashboard.mjs
@@ -43,6 +47,14 @@ jobs:
         with:
           name: reviewos-history-${{ github.run_id }}
           path: .reviewos/history
+          if-no-files-found: ignore
+
+      - name: Upload Prompt Traces
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reviewos-traces-${{ github.run_id }}
+          path: .reviewos/traces
           if-no-files-found: ignore
 
       - name: Upload SARIF Artifact
@@ -67,4 +79,5 @@ jobs:
           path: |
             docs/review-dashboard.md
             docs/review-dashboard.csv
+            docs/repo-baseline.csv
           if-no-files-found: ignore

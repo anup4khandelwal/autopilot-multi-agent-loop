@@ -2,13 +2,13 @@
 
 ReviewOps Copilot for pull requests. `review-os` shifts teams from implementation-heavy flow to structured review across Engineering, Product, Design, and Security.
 
-## Latest Update (v0.1.4)
+## Latest Update (v0.1.5)
 
-- Added risk-based reviewer routing (ranked CODEOWNERS suggestions)
-- Added PR label automation (`reviewos:critical`, `reviewos:security`, `reviewos:ready`)
-- Added SARIF security export (`.reviewos/security-findings.sarif`) + workflow upload
-- Added delta digest in PR report (added/resolved findings since previous run)
-- Added trend anomaly detection in dashboard
+- Added actionable fix suggestions in PR report for top findings
+- Added reviewer SLA reminder bot (scheduled workflow + cooldown handling)
+- Added multi-repo baseline comparison in dashboard output
+- Added prompt-trace capture per lens to `.reviewos/traces/*.json`
+- Added auto release gate enforcement for release PRs with unresolved critical findings
 
 ## What it does
 
@@ -28,6 +28,7 @@ ReviewOps Copilot for pull requests. `review-os` shifts teams from implementatio
 - Stores review memory in `.reviewos/history/*.json`
 - Writes machine-readable latest report to `.reviewos/last-report.json`
 - Exports SARIF findings for security scanning integrations
+- Captures structured scoring traces for each lens
 - Generates trend dashboard `docs/review-dashboard.md`
 - Exports dashboard dataset as CSV `docs/review-dashboard.csv`
 - Publishes dashboard to GitHub Pages via workflow
@@ -53,6 +54,8 @@ Use `.reviewos.yml`:
 - `reviewer_routing.risk_based` boost risky-domain owner routing
 - `labels.enabled` enable PR label automation
 - `labels.critical_label|security_label|ready_label` managed labels
+- `fix_suggestions.enabled|max_items` include remediation hints in PR report
+- `reviewer_sla.enabled|threshold_hours|cooldown_hours` reminder policy
 - `path_overrides` apply path-based penalties and test requirements
 - `alerts.enabled` enable Slack/Discord critical alerts
 - `alerts.slack_webhook_env` env var name for Slack webhook
@@ -62,6 +65,8 @@ Use `.reviewos.yml`:
 - `policy_preset` quick baseline (`startup`, `fintech`, `enterprise`)
 - `governance.policy_lock` enforce config SHA-256 hash check
 - `governance.signature` optional HMAC signature for signed config
+- `prompt_trace.enabled|output_dir` persist lens-level decision traces
+- `release_gate.enabled|title_regex|base_branch_regex` enforce critical-free release PRs
 
 CI env override:
 
@@ -103,6 +108,7 @@ node scripts/build-dashboard.mjs
 Output: `docs/review-dashboard.md`
 
 Also writes: `docs/review-dashboard.csv`
+Also writes: `docs/repo-baseline.csv`
 
 ## Publish dashboard (Pages)
 
@@ -120,7 +126,11 @@ It will:
   - PR review loop
   - dashboard build
   - SARIF generation/upload
+  - prompt trace artifact upload
+  - release gate enforcement
   - artifacts upload
+- `.github/workflows/reviewer-sla-reminder.yml`
+  - scheduled reminder comments for PRs exceeding review SLA
 - `.github/workflows/review-os-dashboard.yml`
   - weekly dashboard build artifact
 - `.github/workflows/review-os-pages.yml`

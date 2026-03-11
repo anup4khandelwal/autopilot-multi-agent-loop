@@ -1,0 +1,23 @@
+name: reviewer-sla-reminder
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  remind:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run SLA reminder bot
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          REVIEW_SLA_HOURS: "24"
+          REVIEW_SLA_COOLDOWN_HOURS: "12"
+        run: node src/sla-reminder.mjs
