@@ -1,0 +1,8 @@
+{
+  "number": 100,
+  "title": "Author exemption case",
+  "body": "Problem: test. User impact: test. Acceptance criteria: test.",
+  "user": { "login": "anup4khandelwal" },
+  "requested_reviewers": [],
+  "requested_teams": []
+}

@@ -2,3 +2,4 @@
 node_modules/
 .env
 .reviewos/history/*.json
+site/

@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.1.2
+
+- Added critical alert integrations (Slack/Discord webhook support)
+- Completed per-path required team/user reviewer enforcement
+- Added dashboard trend metrics for reviewer coverage and auto-request rates
+- Added dashboard publishing workflow for GitHub Pages
+- Added policy test matrix with deterministic fixtures
+
 ## v0.1.1
 
 - Added path-based policy overrides for sensitive path enforcement

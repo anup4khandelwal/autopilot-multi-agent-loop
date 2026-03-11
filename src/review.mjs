@@ -41,6 +41,11 @@ function loadConfig(configPath = ".reviewos.yml") {
       auto_request: false,
       max_reviewers: 3,
     },
+    alerts: {
+      enabled: false,
+      slack_webhook_env: "SLACK_WEBHOOK_URL",
+      discord_webhook_env: "DISCORD_WEBHOOK_URL",
+    },
     path_overrides: {},
   };
 
@@ -52,6 +57,7 @@ function loadConfig(configPath = ".reviewos.yml") {
     weights: { ...defaults.weights },
     thresholds: { ...defaults.thresholds },
     reviewer_routing: { ...defaults.reviewer_routing },
+    alerts: { ...defaults.alerts },
     path_overrides: { ...defaults.path_overrides },
   };
 
@@ -332,6 +338,7 @@ function runAgentLoop({ pr, files, config, repoSlug }) {
       mergeReadiness,
       history,
       requiredReviewers: override.required,
+      matchedPathRules: override.matchedRules,
     };
 
     if (signature === previousSignature) break;
@@ -429,6 +436,7 @@ function applyPathOverrides({ files, config, hasTests }) {
   const adjustments = { engineering: 0, product: 0, design: 0, security: 0 };
   const findings = [];
   const required = { users: new Set(), teams: new Set() };
+  const matchedRules = [];
   const rules = Object.entries(config.path_overrides || {});
 
   for (const [name, rule] of rules) {
@@ -436,6 +444,7 @@ function applyPathOverrides({ files, config, hasTests }) {
     const regex = patternToRegex(String(rule.pattern));
     const matched = files.filter((f) => regex.test(f.filename));
     if (matched.length === 0) continue;
+    matchedRules.push({ name, count: matched.length });
 
     const matchedCount = matched.length;
     const engPenalty = Number(rule.engineering_penalty || 0);
@@ -463,7 +472,9 @@ function applyPathOverrides({ files, config, hasTests }) {
       findings.push({
         severity: "critical",
         lens: "PathPolicy",
-        message: rule.require_tests_message || `Rule '${name}' requires test updates for matched files.`,
+        message: rule.require_tests_message
+          ? `Rule '${name}': ${rule.require_tests_message}`
+          : `Rule '${name}' requires test updates for matched files.`,
       });
     }
 
@@ -479,7 +490,7 @@ function applyPathOverrides({ files, config, hasTests }) {
     for (const t of requiredTeams) required.teams.add(t.replace(/^@/, ""));
   }
 
-  return { adjustments, findings, required: { users: [...required.users], teams: [...required.teams] } };
+  return { adjustments, findings, required: { users: [...required.users], teams: [...required.teams] }, matchedRules };
 }
 
 function collectCurrentReviewers(pr) {
@@ -636,6 +647,44 @@ async function requestReviewers(owner, repo, pullNumber, token, reviewerRouting)
   });
 }
 
+async function sendCriticalAlerts({ config, repoSlug, pr, result }) {
+  if (!config.alerts?.enabled) return { sent: [] };
+  if (!result.grouped?.critical?.length) return { sent: [] };
+
+  const title = `review-os critical findings in ${repoSlug}#${pr.number}`;
+  const summaryLines = result.grouped.critical.map((f) => `- ${f.lens}: ${f.message}`).join("\n");
+  const prUrl = pr.html_url || `https://github.com/${repoSlug}/pull/${pr.number}`;
+  const sent = [];
+
+  const slackEnv = String(config.alerts.slack_webhook_env || "SLACK_WEBHOOK_URL");
+  const slackUrl = process.env[slackEnv];
+  if (slackUrl) {
+    await fetch(slackUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        text: `${title}\nMerge readiness: ${result.mergeReadiness}/100\n${prUrl}\n${summaryLines}`,
+      }),
+    });
+    sent.push("slack");
+  }
+
+  const discordEnv = String(config.alerts.discord_webhook_env || "DISCORD_WEBHOOK_URL");
+  const discordUrl = process.env[discordEnv];
+  if (discordUrl) {
+    await fetch(discordUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        content: `**${title}**\\nMerge readiness: ${result.mergeReadiness}/100\\n${prUrl}\\n${summaryLines}`,
+      }),
+    });
+    sent.push("discord");
+  }
+
+  return { sent };
+}
+
 function readMock(pathVar) {
   if (!process.env[pathVar]) return null;
   return JSON.parse(fs.readFileSync(process.env[pathVar], "utf8"));
@@ -645,7 +694,8 @@ async function main() {
   const eventPath = process.env.GITHUB_EVENT_PATH;
   const repoSlug = process.env.GITHUB_REPOSITORY || "local/review-os";
   const token = process.env.GITHUB_TOKEN;
-  const config = loadConfig();
+  const configPath = process.env.REVIEW_OS_CONFIG || ".reviewos.yml";
+  const config = loadConfig(configPath);
 
   const failOnCriticalEnv = process.env.FAIL_ON_CRITICAL;
   const failOnCritical = failOnCriticalEnv ? failOnCriticalEnv.toLowerCase() === "true" : Boolean(config.fail_on_critical);
@@ -735,6 +785,7 @@ async function main() {
   };
 
   const comment = buildComment({ pr, result, nextSteps, reviewerRouting, requiredCoverage });
+  const autoRequestAttempted = reviewerRouting.enabled && reviewerRouting.autoRequest;
 
   const historyEntry = {
     timestamp: new Date().toISOString(),
@@ -742,6 +793,16 @@ async function main() {
     mergeReadiness: result.mergeReadiness,
     scores: result.scores,
     findings: result.findings,
+    requiredCoverage,
+    reviewerRouting: {
+      suggestedUsers: reviewerRouting.users,
+      suggestedTeams: reviewerRouting.teams,
+      autoRequestAttempted,
+      requestedViaRequired,
+    },
+    pathPolicy: {
+      matchedRules: result.matchedPathRules || [],
+    },
   };
   const historyFilePath = saveHistory(repoSlug, pr.number, historyEntry);
 
@@ -766,6 +827,11 @@ async function main() {
     }
 
     console.log(`History updated: ${historyFilePath}`);
+
+    const alertResult = await sendCriticalAlerts({ config, repoSlug, pr, result });
+    if (alertResult.sent.length) {
+      console.log(`Alerts sent: ${alertResult.sent.join(",")}`);
+    }
   }
 
   if (failOnCritical && result.grouped.critical.length > 0) {

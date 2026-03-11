@@ -1,0 +1,20 @@
+weights:
+  engineering: 0.35
+  product: 0.25
+  design: 0.15
+  security: 0.25
+thresholds:
+  engineering_warning: 70
+  product_warning: 70
+  design_warning: 75
+  security_warning: 75
+max_iterations: 1
+fail_on_critical: true
+reviewer_routing:
+  enabled: true
+  auto_request: false
+  max_reviewers: 3
+path_overrides:
+  workflow_paths:
+    pattern: .github/workflows/*
+    required_teams: acme/security

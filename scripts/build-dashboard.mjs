@@ -44,6 +44,20 @@ function findingKey(f) {
   return `${f?.severity || "unknown"}|${f?.lens || "unknown"}|${f?.message || "unknown"}`;
 }
 
+function extractPathRuleFromMessage(msg) {
+  const text = String(msg || "");
+  const m = text.match(/Rule '([^']+)'(?: matched|:| requires)/);
+  return m ? m[1] : null;
+}
+
+function buildTable(headers, rows) {
+  if (!rows.length) return "No data yet.";
+  const head = `| ${headers.join(" | ")} |`;
+  const sep = `|${headers.map(() => "---").join("|")}|`;
+  const body = rows.map((r) => `| ${r.join(" | ")} |`).join("\n");
+  return `${head}\n${sep}\n${body}`;
+}
+
 function buildDashboard(runs) {
   const totalRuns = runs.length;
   const readiness = runs.map((r) => Number(r.mergeReadiness) || 0);
@@ -60,6 +74,13 @@ function buildDashboard(runs) {
   let infoCount = 0;
   const findingFreq = new Map();
 
+  let reviewerMissCount = 0;
+  let reviewerMissRuns = 0;
+  let autoRequestAttempts = 0;
+  let autoRequestSuccess = 0;
+
+  const criticalPathCounts = new Map();
+
   for (const r of runs) {
     const findings = Array.isArray(r.findings) ? r.findings : [];
     for (const f of findings) {
@@ -67,8 +88,24 @@ function buildDashboard(runs) {
       else if (f.severity === "warning") warningCount += 1;
       else infoCount += 1;
 
+      if (f.severity === "critical" && f.lens === "PathPolicy") {
+        const ruleName = extractPathRuleFromMessage(f.message) || "path_policy_unknown";
+        criticalPathCounts.set(ruleName, (criticalPathCounts.get(ruleName) || 0) + 1);
+      }
+
       const key = findingKey(f);
       findingFreq.set(key, (findingFreq.get(key) || 0) + 1);
+    }
+
+    const missingUsers = r.requiredCoverage?.missing?.users || [];
+    const missingTeams = r.requiredCoverage?.missing?.teams || [];
+    const missingTotal = missingUsers.length + missingTeams.length;
+    reviewerMissCount += missingTotal;
+    if (missingTotal > 0) reviewerMissRuns += 1;
+
+    if (r.reviewerRouting?.autoRequestAttempted) {
+      autoRequestAttempts += 1;
+      if (r.reviewerRouting?.requestedViaRequired) autoRequestSuccess += 1;
     }
   }
 
@@ -80,8 +117,14 @@ function buildDashboard(runs) {
       return { severity, lens: lensName, message, count };
     });
 
+  const topCriticalPaths = [...criticalPathCounts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 8);
+
   const lastRun = runs.at(-1);
   const generatedAt = new Date().toISOString();
+
+  const autoRequestRate = autoRequestAttempts ? (autoRequestSuccess / autoRequestAttempts) * 100 : 0;
 
   return `# ReviewOS Trend Dashboard
 
@@ -108,9 +151,20 @@ Generated: ${generatedAt}
 - Warning: ${warningCount}
 - Info: ${infoCount}
 
+## Reviewer Coverage Metrics
+
+- Runs with missing required reviewer coverage: ${reviewerMissRuns}
+- Total missing reviewer slots (users + teams): ${reviewerMissCount}
+- Auto-request attempts: ${autoRequestAttempts}
+- Auto-request success rate: ${autoRequestRate.toFixed(1)}%
+
+## Critical by Path Policy Rule
+
+${buildTable(["Rule", "Critical Count"], topCriticalPaths.map(([rule, count]) => [rule, String(count)]))}
+
 ## Top Recurring Findings
 
-${topFindings.length ? "| Severity | Lens | Count | Finding |\n|---|---|---:|---|\n" + topFindings.map((f) => `| ${f.severity} | ${f.lens} | ${f.count} | ${f.message.replace(/\|/g, "\\|")} |`).join("\n") : "No findings recorded yet."}
+${topFindings.length ? buildTable(["Severity", "Lens", "Count", "Finding"], topFindings.map((f) => [f.severity, f.lens, String(f.count), f.message.replace(/\|/g, "\\|")])) : "No findings recorded yet."}
 
 ## Notes
 

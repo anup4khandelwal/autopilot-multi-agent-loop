@@ -1,0 +1,9 @@
+{
+  "number": 101,
+  "title": "Missing required team case",
+  "body": "Problem: test. User impact: test. Acceptance criteria: test.",
+  "user": { "login": "someone-else" },
+  "base": { "repo": { "owner": { "login": "acme" } } },
+  "requested_reviewers": [],
+  "requested_teams": []
+}

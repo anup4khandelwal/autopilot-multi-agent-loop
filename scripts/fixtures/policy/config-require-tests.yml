@@ -1,0 +1,21 @@
+weights:
+  engineering: 0.35
+  product: 0.25
+  design: 0.15
+  security: 0.25
+thresholds:
+  engineering_warning: 70
+  product_warning: 70
+  design_warning: 75
+  security_warning: 75
+max_iterations: 1
+fail_on_critical: true
+reviewer_routing:
+  enabled: false
+  auto_request: false
+  max_reviewers: 3
+path_overrides:
+  auth_paths:
+    pattern: src/auth/*
+    require_tests: true
+    require_tests_message: Auth tests required by policy.

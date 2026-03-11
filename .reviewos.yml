@@ -19,6 +19,11 @@ reviewer_routing:
   auto_request: true
   max_reviewers: 3
 
+alerts:
+  enabled: false
+  slack_webhook_env: SLACK_WEBHOOK_URL
+  discord_webhook_env: DISCORD_WEBHOOK_URL
+
 path_overrides:
   auth_paths:
     pattern: src/auth/*
@@ -35,3 +40,4 @@ path_overrides:
     engineering_penalty: 4
     security_penalty: 6
     required_users: anup4khandelwal
+    # required_teams: your-org/release-engineering

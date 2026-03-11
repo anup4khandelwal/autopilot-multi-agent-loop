@@ -19,9 +19,12 @@ ReviewOps Copilot for pull requests. `review-os` shifts teams from implementatio
 - Posts/upserts a structured PR comment
 - Suggests reviewers from `CODEOWNERS`
 - Optionally auto-requests reviewers via GitHub API
+- Supports per-path required user/team reviewer policies
 - Optionally fails CI when critical findings are present
+- Sends optional Slack/Discord alerts on critical findings
 - Stores review memory in `.reviewos/history/*.json`
 - Generates trend dashboard `docs/review-dashboard.md`
+- Publishes dashboard to GitHub Pages via workflow
 
 ## Quick start
 
@@ -42,6 +45,9 @@ Use `.reviewos.yml`:
 - `reviewer_routing.auto_request` auto-request reviewers
 - `reviewer_routing.max_reviewers` cap requests
 - `path_overrides` apply path-based penalties and test requirements
+- `alerts.enabled` enable Slack/Discord critical alerts
+- `alerts.slack_webhook_env` env var name for Slack webhook
+- `alerts.discord_webhook_env` env var name for Discord webhook
 
 CI env override:
 
@@ -79,6 +85,16 @@ node scripts/build-dashboard.mjs
 
 Output: `docs/review-dashboard.md`
 
+## Publish dashboard (Pages)
+
+Run workflow: `.github/workflows/review-os-pages.yml`
+
+It will:
+
+- Build `docs/review-dashboard.md`
+- Render static site at `site/index.html`
+- Deploy to GitHub Pages
+
 ## CI workflows
 
 - `.github/workflows/review-os.yml`
@@ -87,6 +103,10 @@ Output: `docs/review-dashboard.md`
   - artifacts upload
 - `.github/workflows/review-os-dashboard.yml`
   - weekly dashboard build artifact
+- `.github/workflows/review-os-pages.yml`
+  - weekly + manual dashboard publishing to GitHub Pages
+- `.github/workflows/quality.yml`
+  - full validation matrix (`scripts/validate.sh`)
 
 ## PR template helper
 
