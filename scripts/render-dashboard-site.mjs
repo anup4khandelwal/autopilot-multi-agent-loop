@@ -3,6 +3,7 @@ import fs from "node:fs";
 const INPUT = "docs/review-dashboard.md";
 const CSV = "docs/review-dashboard.csv";
 const REPO_CSV = "docs/repo-baseline.csv";
+const CONFIDENCE_CSV = "docs/review-confidence.csv";
 const OWNERSHIP_CSV = "docs/finding-ownership.csv";
 const OWNERSHIP_MD = "docs/finding-ownership.md";
 const OUT_DIR = "site";
@@ -19,6 +20,10 @@ const csvExists = fs.existsSync(CSV);
 const csvLink = csvExists ? `<div class="meta"><a href="./review-dashboard.csv">Download CSV</a></div>` : "";
 const repoCsvExists = fs.existsSync(REPO_CSV);
 const repoCsvLink = repoCsvExists ? `<div class="meta"><a href="./repo-baseline.csv">Download Repo Baseline CSV</a></div>` : "";
+const confidenceCsvExists = fs.existsSync(CONFIDENCE_CSV);
+const confidenceCsvLink = confidenceCsvExists
+  ? `<div class="meta"><a href="./review-confidence.csv">Download Confidence Bands CSV</a></div>`
+  : "";
 const ownershipCsvExists = fs.existsSync(OWNERSHIP_CSV);
 const ownershipCsvLink = ownershipCsvExists
   ? `<div class="meta"><a href="./finding-ownership.csv">Download Finding Ownership CSV</a></div>`
@@ -48,6 +53,7 @@ const html = `<!doctype html>
     <div class="meta">Source: docs/review-dashboard.md</div>
     ${csvLink}
     ${repoCsvLink}
+    ${confidenceCsvLink}
     ${ownershipCsvLink}
     ${ownershipMdLink}
     <pre>${escaped}</pre>
@@ -62,6 +68,9 @@ if (csvExists) {
 }
 if (repoCsvExists) {
   fs.copyFileSync(REPO_CSV, `${OUT_DIR}/repo-baseline.csv`);
+}
+if (confidenceCsvExists) {
+  fs.copyFileSync(CONFIDENCE_CSV, `${OUT_DIR}/review-confidence.csv`);
 }
 if (ownershipCsvExists) {
   fs.copyFileSync(OWNERSHIP_CSV, `${OUT_DIR}/finding-ownership.csv`);

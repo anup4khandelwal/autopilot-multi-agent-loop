@@ -5,6 +5,7 @@ const HISTORY_DIR = ".reviewos/history";
 const OUTPUT = "docs/review-dashboard.md";
 const OUTPUT_CSV = "docs/review-dashboard.csv";
 const OUTPUT_REPO_CSV = "docs/repo-baseline.csv";
+const OUTPUT_CONFIDENCE_CSV = "docs/review-confidence.csv";
 
 function ensureDir(dirPath) {
   fs.mkdirSync(dirPath, { recursive: true });
@@ -21,6 +22,23 @@ function safeReadJson(filePath) {
 function avg(nums) {
   if (!nums.length) return 0;
   return nums.reduce((a, b) => a + b, 0) / nums.length;
+}
+
+function stddev(nums) {
+  if (nums.length < 2) return 0;
+  const m = avg(nums);
+  const variance = nums.reduce((s, n) => s + (n - m) * (n - m), 0) / (nums.length - 1);
+  return Math.sqrt(variance);
+}
+
+function ci95(nums) {
+  const n = nums.length;
+  if (!n) return { mean: 0, lower: 0, upper: 0, margin: 0, n: 0 };
+  const mean = avg(nums);
+  if (n === 1) return { mean, lower: mean, upper: mean, margin: 0, n };
+  const se = stddev(nums) / Math.sqrt(n);
+  const margin = 1.96 * se;
+  return { mean, lower: mean - margin, upper: mean + margin, margin, n };
 }
 
 function collectRuns() {
@@ -179,6 +197,11 @@ function buildDashboard(runs) {
   const generatedAt = new Date().toISOString();
 
   const autoRequestRate = autoRequestAttempts ? (autoRequestSuccess / autoRequestAttempts) * 100 : 0;
+  const readinessCi = ci95(readiness);
+  const engineeringCi = ci95(lens.engineering);
+  const productCi = ci95(lens.product);
+  const designCi = ci95(lens.design);
+  const securityCi = ci95(lens.security);
   const recent = runs.slice(-10).reverse();
   const readinessBars = recent
     .map((r) => `- ${(r.timestamp || "").slice(0, 19)} PR#${r.pr}: ${bar(Number(r.mergeReadiness || 0))}`)
@@ -254,6 +277,19 @@ Generated: ${generatedAt}
 - Design: ${bar(avg(lens.design))}
 - Security: ${bar(avg(lens.security))}
 
+## Confidence Bands (95%)
+
+${buildTable(
+  ["Metric", "Mean", "Lower", "Upper", "Margin", "N"],
+  [
+    ["Merge Readiness", readinessCi.mean.toFixed(2), readinessCi.lower.toFixed(2), readinessCi.upper.toFixed(2), readinessCi.margin.toFixed(2), String(readinessCi.n)],
+    ["Engineering", engineeringCi.mean.toFixed(2), engineeringCi.lower.toFixed(2), engineeringCi.upper.toFixed(2), engineeringCi.margin.toFixed(2), String(engineeringCi.n)],
+    ["Product", productCi.mean.toFixed(2), productCi.lower.toFixed(2), productCi.upper.toFixed(2), productCi.margin.toFixed(2), String(productCi.n)],
+    ["Design", designCi.mean.toFixed(2), designCi.lower.toFixed(2), designCi.upper.toFixed(2), designCi.margin.toFixed(2), String(designCi.n)],
+    ["Security", securityCi.mean.toFixed(2), securityCi.lower.toFixed(2), securityCi.upper.toFixed(2), securityCi.margin.toFixed(2), String(securityCi.n)],
+  ]
+)}
+
 ## Finding Volume
 
 - Critical: ${criticalCount}
@@ -293,6 +329,7 @@ ${topFindings.length ? buildTable(["Severity", "Lens", "Count", "Finding"], topF
 - This dashboard summarizes historical review runs across PRs.
 - CSV export: \`${OUTPUT_CSV}\`
 - Repo baseline CSV: \`${OUTPUT_REPO_CSV}\`
+- Confidence CSV: \`${OUTPUT_CONFIDENCE_CSV}\`
 `;
 }
 
@@ -317,6 +354,27 @@ function writeRepoCsv(runs) {
   fs.writeFileSync(OUTPUT_REPO_CSV, `${lines.join("\n")}\n`);
 }
 
+function writeConfidenceCsv(runs) {
+  const readiness = runs.map((r) => Number(r.mergeReadiness) || 0);
+  const engineering = runs.map((r) => Number(r.scores?.engineering) || 0);
+  const product = runs.map((r) => Number(r.scores?.product) || 0);
+  const design = runs.map((r) => Number(r.scores?.design) || 0);
+  const security = runs.map((r) => Number(r.scores?.security) || 0);
+
+  const rows = [
+    ["merge_readiness", ci95(readiness)],
+    ["engineering", ci95(engineering)],
+    ["product", ci95(product)],
+    ["design", ci95(design)],
+    ["security", ci95(security)],
+  ];
+  const lines = ["metric,mean,lower,upper,margin,n"];
+  for (const [metric, c] of rows) {
+    lines.push(`${metric},${c.mean.toFixed(4)},${c.lower.toFixed(4)},${c.upper.toFixed(4)},${c.margin.toFixed(4)},${c.n}`);
+  }
+  fs.writeFileSync(OUTPUT_CONFIDENCE_CSV, `${lines.join("\n")}\n`);
+}
+
 function main() {
   ensureDir("docs");
   const runs = collectRuns();
@@ -324,9 +382,11 @@ function main() {
   fs.writeFileSync(OUTPUT, content);
   writeCsv(runs);
   writeRepoCsv(runs);
+  writeConfidenceCsv(runs);
   console.log(`Dashboard written: ${OUTPUT}`);
   console.log(`Dashboard CSV written: ${OUTPUT_CSV}`);
   console.log(`Repo baseline CSV written: ${OUTPUT_REPO_CSV}`);
+  console.log(`Confidence CSV written: ${OUTPUT_CONFIDENCE_CSV}`);
   console.log(`Runs analyzed: ${runs.length}`);
 }
 

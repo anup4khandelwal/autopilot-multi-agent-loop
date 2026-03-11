@@ -82,6 +82,7 @@ jobs:
             docs/review-dashboard.md
             docs/review-dashboard.csv
             docs/repo-baseline.csv
+            docs/review-confidence.csv
             docs/finding-ownership.md
             docs/finding-ownership.csv
           if-no-files-found: ignore

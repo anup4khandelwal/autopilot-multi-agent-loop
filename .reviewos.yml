@@ -20,6 +20,10 @@ reviewer_routing:
   auto_request: true
   max_reviewers: 3
   risk_based: true
+  load_balance_enabled: true
+  load_balance_state_file: .reviewos/reviewer-load.json
+  load_balance_decay_days: 14
+  load_balance_weight: 0.6
 
 labels:
   enabled: true

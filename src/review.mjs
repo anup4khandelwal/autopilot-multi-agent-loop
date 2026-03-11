@@ -122,6 +122,10 @@ function loadConfig(configPath = ".reviewos.yml") {
       auto_request: false,
       max_reviewers: 3,
       risk_based: true,
+      load_balance_enabled: true,
+      load_balance_state_file: ".reviewos/reviewer-load.json",
+      load_balance_decay_days: 14,
+      load_balance_weight: 0.6,
     },
     labels: {
       enabled: false,
@@ -715,7 +719,92 @@ function resolveReviewers(files, prAuthor, codeownerRules, options = {}) {
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
     .map(([name]) => name)
     .slice(0, cap);
-  return { users: sortedUsers, teams: sortedTeams };
+  return {
+    users: sortedUsers,
+    teams: sortedTeams,
+    userScores: Object.fromEntries(users.entries()),
+    teamScores: Object.fromEntries(teams.entries()),
+  };
+}
+
+function loadReviewerLoadState(statePath) {
+  if (!fs.existsSync(statePath)) return { users: {}, teams: {} };
+  try {
+    const parsed = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    return {
+      users: parsed?.users || {},
+      teams: parsed?.teams || {},
+    };
+  } catch {
+    return { users: {}, teams: {} };
+  }
+}
+
+function saveReviewerLoadState(statePath, state) {
+  ensureDir(path.dirname(statePath));
+  fs.writeFileSync(statePath, JSON.stringify(state, null, 2));
+}
+
+function decayLoadCounter(value, daysSince, decayDays) {
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  if (!Number.isFinite(daysSince) || daysSince <= 0) return value;
+  const factor = Math.max(1, decayDays) / (Math.max(1, decayDays) + daysSince);
+  return value * factor;
+}
+
+function pickLoadBalancedCandidates(candidates, scoreMap, loadMap, cap, weight, nowTs, decayDays) {
+  const ranked = candidates
+    .map((id) => {
+      const base = Number(scoreMap[id] || 0);
+      const rec = loadMap[id] || { count: 0, updated_at: "" };
+      const daysSince = rec.updated_at ? (nowTs - new Date(rec.updated_at).getTime()) / (1000 * 60 * 60 * 24) : 999;
+      const decayed = decayLoadCounter(Number(rec.count || 0), daysSince, decayDays);
+      const finalScore = base - weight * decayed;
+      return { id, base, decayed, finalScore };
+    })
+    .sort((a, b) => b.finalScore - a.finalScore || a.id.localeCompare(b.id));
+  return ranked.slice(0, cap).map((r) => r.id);
+}
+
+function applyReviewerLoadBalancing(routing, config) {
+  if (!config.reviewer_routing?.load_balance_enabled) return routing;
+  const statePath = String(config.reviewer_routing?.load_balance_state_file || ".reviewos/reviewer-load.json");
+  const state = loadReviewerLoadState(statePath);
+  const cap = Math.max(1, Number(config.reviewer_routing?.max_reviewers || 3));
+  const weight = Math.max(0, Number(config.reviewer_routing?.load_balance_weight || 0.6));
+  const decayDays = Math.max(1, Number(config.reviewer_routing?.load_balance_decay_days || 14));
+  const nowTs = Date.now();
+
+  const users = pickLoadBalancedCandidates(routing.users, routing.userScores || {}, state.users || {}, cap, weight, nowTs, decayDays);
+  const teams = pickLoadBalancedCandidates(routing.teams, routing.teamScores || {}, state.teams || {}, cap, weight, nowTs, decayDays);
+
+  return {
+    ...routing,
+    users,
+    teams,
+    loadBalance: {
+      enabled: true,
+      statePath,
+      decayDays,
+      weight,
+    },
+  };
+}
+
+function updateReviewerLoadState(config, users, teams) {
+  if (!config.reviewer_routing?.load_balance_enabled) return;
+  const statePath = String(config.reviewer_routing?.load_balance_state_file || ".reviewos/reviewer-load.json");
+  const state = loadReviewerLoadState(statePath);
+  const now = new Date().toISOString();
+  for (const u of users || []) {
+    const prev = state.users[u] || { count: 0 };
+    state.users[u] = { count: Number(prev.count || 0) + 1, updated_at: now };
+  }
+  for (const t of teams || []) {
+    const prev = state.teams[t] || { count: 0 };
+    state.teams[t] = { count: Number(prev.count || 0) + 1, updated_at: now };
+  }
+  saveReviewerLoadState(statePath, state);
 }
 
 function applyPathOverrides({ files, config, hasTests }) {
@@ -1385,6 +1474,11 @@ async function main() {
       riskBased: Boolean(config.reviewer_routing?.risk_based),
     }),
   };
+  const routed = applyReviewerLoadBalancing(reviewerRouting, config);
+  const reviewerRoutingFinal = {
+    ...reviewerRouting,
+    ...routed,
+  };
 
   const required = result.requiredReviewers || { users: [], teams: [] };
   let currentCoverage = collectCurrentReviewers(pr);
@@ -1392,15 +1486,16 @@ async function main() {
   const approvalCount = (reviews || []).filter((r) => String(r.state || "").toUpperCase() === "APPROVED").length;
 
   let missingRequired = computeMissingRequired(required, currentCoverage, prAuthor);
-  const shouldRequest = reviewerRouting.enabled && reviewerRouting.autoRequest && !mockPr;
+  const shouldRequest = reviewerRoutingFinal.enabled && reviewerRoutingFinal.autoRequest && !mockPr;
   if (shouldRequest && (missingRequired.users.length || missingRequired.teams.length)) {
     const requestPayload = {
-      users: [...new Set([...reviewerRouting.users, ...missingRequired.users])].filter((u) => u && u !== prAuthor),
-      teams: [...new Set([...reviewerRouting.teams, ...missingRequired.teams])],
+      users: [...new Set([...reviewerRoutingFinal.users, ...missingRequired.users])].filter((u) => u && u !== prAuthor),
+      teams: [...new Set([...reviewerRoutingFinal.teams, ...missingRequired.teams])],
     };
     if (requestPayload.users.length || requestPayload.teams.length) {
       const [owner, repo] = repoSlug.split("/");
       await requestReviewers(owner, repo, pr.number, token, requestPayload);
+      updateReviewerLoadState(config, requestPayload.users, requestPayload.teams);
       requestedViaRequired = true;
       currentCoverage = {
         users: new Set([...currentCoverage.users, ...requestPayload.users]),
@@ -1472,12 +1567,12 @@ async function main() {
     pr,
     result,
     nextSteps,
-    reviewerRouting,
+    reviewerRouting: reviewerRoutingFinal,
     requiredCoverage,
     fixSuggestions,
     checklist,
   });
-  const autoRequestAttempted = reviewerRouting.enabled && reviewerRouting.autoRequest;
+  const autoRequestAttempted = reviewerRoutingFinal.enabled && reviewerRoutingFinal.autoRequest;
   const approvedByReviewer = (reviews || []).some((r) => String(r.state || "").toUpperCase() === "APPROVED");
   const prAgeHours = pr.created_at ? Math.max(0, (Date.now() - new Date(pr.created_at).getTime()) / (1000 * 60 * 60)) : 0;
   const slaExceeded = config.reviewer_sla?.enabled && !approvedByReviewer && prAgeHours >= Number(config.reviewer_sla?.threshold_hours || 24);
@@ -1490,10 +1585,11 @@ async function main() {
     findings: result.findings,
     requiredCoverage,
     reviewerRouting: {
-      suggestedUsers: reviewerRouting.users,
-      suggestedTeams: reviewerRouting.teams,
+      suggestedUsers: reviewerRoutingFinal.users,
+      suggestedTeams: reviewerRoutingFinal.teams,
       autoRequestAttempted,
       requestedViaRequired,
+      loadBalanced: Boolean(config.reviewer_routing?.load_balance_enabled),
     },
     pathPolicy: {
       matchedRules: result.matchedPathRules || [],
@@ -1534,9 +1630,9 @@ async function main() {
         nextSteps,
         reviewerRouting: {
           enabled: reviewerRouting.enabled,
-          users: reviewerRouting.users,
-          teams: reviewerRouting.teams,
-          autoRequest: reviewerRouting.autoRequest,
+          users: reviewerRoutingFinal.users,
+          teams: reviewerRoutingFinal.teams,
+          autoRequest: reviewerRoutingFinal.autoRequest,
           requestedViaRequired,
         },
         requiredCoverage,
@@ -1554,20 +1650,21 @@ async function main() {
   if (process.env.DRY_RUN_COMMENT === "1" || mockPr) {
     console.log(comment);
     console.log(`History updated: ${historyFilePath}`);
-    console.log(`Suggested users: ${reviewerRouting.users.join(",") || "none"}`);
-    console.log(`Suggested teams: ${reviewerRouting.teams.join(",") || "none"}`);
+    console.log(`Suggested users: ${reviewerRoutingFinal.users.join(",") || "none"}`);
+    console.log(`Suggested teams: ${reviewerRoutingFinal.teams.join(",") || "none"}`);
   } else {
     const [owner, repo] = repoSlug.split("/");
     const upsert = await upsertComment(owner, repo, pr.number, token, comment);
     console.log(`Review comment ${upsert.mode}: ${upsert.id}`);
 
     if (
-      reviewerRouting.enabled &&
-      reviewerRouting.autoRequest &&
+      reviewerRoutingFinal.enabled &&
+      reviewerRoutingFinal.autoRequest &&
       !requestedViaRequired &&
-      (reviewerRouting.users.length || reviewerRouting.teams.length)
+      (reviewerRoutingFinal.users.length || reviewerRoutingFinal.teams.length)
     ) {
-      await requestReviewers(owner, repo, pr.number, token, reviewerRouting);
+      await requestReviewers(owner, repo, pr.number, token, reviewerRoutingFinal);
+      updateReviewerLoadState(config, reviewerRoutingFinal.users, reviewerRoutingFinal.teams);
       console.log("Requested reviewers via GitHub API.");
     }
 
@@ -1623,7 +1720,7 @@ async function main() {
     pr,
     result,
     nextSteps,
-    reviewerRouting,
+    reviewerRouting: reviewerRoutingFinal,
     requiredCoverage,
     matchedRules: result.matchedPathRules || [],
     checklist,

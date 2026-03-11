@@ -7,6 +7,8 @@ ReviewOps Copilot for pull requests. `review-os` shifts teams from implementatio
 - Added incident-safe mode with stronger security penalties and mandatory approval checks
 - Added dynamic pre-merge checklist generation in PR comments and step summaries
 - Added finding ownership mapping with exportable ownership reports
+- Added reviewer load balancing to distribute reviewer requests over time
+- Added 95% confidence-band analytics for readiness/lens metrics (`docs/review-confidence.csv`)
 
 ## What it does
 
@@ -17,6 +19,7 @@ ReviewOps Copilot for pull requests. `review-os` shifts teams from implementatio
 - Posts/upserts a structured PR comment
 - Suggests reviewers from `CODEOWNERS`
 - Prioritizes reviewers based on risky file domains
+- Balances reviewer assignment load to reduce bottlenecks
 - Optionally auto-requests reviewers via GitHub API
 - Supports per-path required user/team reviewer policies
 - Optionally fails CI when critical findings are present
@@ -52,6 +55,7 @@ Use `.reviewos.yml`:
 - `reviewer_routing.auto_request` auto-request reviewers
 - `reviewer_routing.max_reviewers` cap requests
 - `reviewer_routing.risk_based` boost risky-domain owner routing
+- `reviewer_routing.load_balance_*` configure reviewer load balancing behavior
 - `labels.enabled` enable PR label automation
 - `labels.critical_label|security_label|ready_label` managed labels
 - `fix_suggestions.enabled|max_items` include remediation hints in PR report
@@ -113,6 +117,7 @@ Also writes: `docs/review-dashboard.csv`
 Also writes: `docs/repo-baseline.csv`
 Also writes: `docs/finding-ownership.md`
 Also writes: `docs/finding-ownership.csv`
+Also writes: `docs/review-confidence.csv`
 
 ## Publish dashboard (Pages)
 

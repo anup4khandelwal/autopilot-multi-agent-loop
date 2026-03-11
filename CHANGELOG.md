@@ -5,6 +5,8 @@
 - Added incident-safe mode with amplified security penalties and required approval checks
 - Added pre-merge checklist generation in PR comments and GitHub step summary
 - Added finding ownership mapping and ownership report exports (`docs/finding-ownership.*`)
+- Added reviewer load balancing to spread reviewer requests over time
+- Added confidence-band analytics and CSV export (`docs/review-confidence.csv`)
 
 ## v0.1.5
 

@@ -6,4 +6,5 @@ node_modules/
 .reviewos/security-findings.sarif
 .reviewos/alerts-state.json
 .reviewos/traces/*.json
+.reviewos/reviewer-load.json
 site/
