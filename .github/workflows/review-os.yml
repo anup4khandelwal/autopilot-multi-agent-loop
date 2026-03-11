@@ -49,5 +49,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: reviewos-dashboard-${{ github.run_id }}
-          path: docs/review-dashboard.md
+          path: |
+            docs/review-dashboard.md
+            docs/review-dashboard.csv
           if-no-files-found: ignore

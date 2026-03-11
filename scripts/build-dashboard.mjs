@@ -3,6 +3,7 @@ import path from "node:path";
 
 const HISTORY_DIR = ".reviewos/history";
 const OUTPUT = "docs/review-dashboard.md";
+const OUTPUT_CSV = "docs/review-dashboard.csv";
 
 function ensureDir(dirPath) {
   fs.mkdirSync(dirPath, { recursive: true });
@@ -56,6 +57,51 @@ function buildTable(headers, rows) {
   const sep = `|${headers.map(() => "---").join("|")}|`;
   const body = rows.map((r) => `| ${r.join(" | ")} |`).join("\n");
   return `${head}\n${sep}\n${body}`;
+}
+
+function bar(value, max = 100, width = 20) {
+  const safe = Math.max(0, Math.min(max, Number(value) || 0));
+  const filled = Math.round((safe / max) * width);
+  return `${"█".repeat(filled)}${"░".repeat(width - filled)} ${safe.toFixed(1)}`;
+}
+
+function writeCsv(runs) {
+  const header = [
+    "timestamp",
+    "pr",
+    "merge_readiness",
+    "engineering",
+    "product",
+    "design",
+    "security",
+    "critical",
+    "warning",
+    "info",
+    "missing_reviewers",
+  ];
+  const lines = [header.join(",")];
+  for (const r of runs) {
+    const findings = Array.isArray(r.findings) ? r.findings : [];
+    const critical = findings.filter((f) => f.severity === "critical").length;
+    const warning = findings.filter((f) => f.severity === "warning").length;
+    const info = findings.filter((f) => f.severity === "info").length;
+    const missing = (r.requiredCoverage?.missing?.users?.length || 0) + (r.requiredCoverage?.missing?.teams?.length || 0);
+    const row = [
+      r.timestamp || "",
+      String(r.pr || ""),
+      Number(r.mergeReadiness || 0),
+      Number(r.scores?.engineering || 0),
+      Number(r.scores?.product || 0),
+      Number(r.scores?.design || 0),
+      Number(r.scores?.security || 0),
+      critical,
+      warning,
+      info,
+      missing,
+    ];
+    lines.push(row.join(","));
+  }
+  fs.writeFileSync(OUTPUT_CSV, `${lines.join("\n")}\n`);
 }
 
 function buildDashboard(runs) {
@@ -125,6 +171,10 @@ function buildDashboard(runs) {
   const generatedAt = new Date().toISOString();
 
   const autoRequestRate = autoRequestAttempts ? (autoRequestSuccess / autoRequestAttempts) * 100 : 0;
+  const recent = runs.slice(-10).reverse();
+  const readinessBars = recent
+    .map((r) => `- ${(r.timestamp || "").slice(0, 19)} PR#${r.pr}: ${bar(Number(r.mergeReadiness || 0))}`)
+    .join("\n");
 
   return `# ReviewOS Trend Dashboard
 
@@ -145,6 +195,13 @@ Generated: ${generatedAt}
 | Design | ${avg(lens.design).toFixed(1)} |
 | Security | ${avg(lens.security).toFixed(1)} |
 
+## Lens Visuals
+
+- Engineering: ${bar(avg(lens.engineering))}
+- Product: ${bar(avg(lens.product))}
+- Design: ${bar(avg(lens.design))}
+- Security: ${bar(avg(lens.security))}
+
 ## Finding Volume
 
 - Critical: ${criticalCount}
@@ -158,6 +215,10 @@ Generated: ${generatedAt}
 - Auto-request attempts: ${autoRequestAttempts}
 - Auto-request success rate: ${autoRequestRate.toFixed(1)}%
 
+## Merge Readiness Trend (Recent 10)
+
+${readinessBars || "No data yet."}
+
 ## Critical by Path Policy Rule
 
 ${buildTable(["Rule", "Critical Count"], topCriticalPaths.map(([rule, count]) => [rule, String(count)]))}
@@ -170,6 +231,7 @@ ${topFindings.length ? buildTable(["Severity", "Lens", "Count", "Finding"], topF
 
 - Data source: \.reviewos/history/*.json
 - This dashboard summarizes historical review runs across PRs.
+- CSV export: \`${OUTPUT_CSV}\`
 `;
 }
 
@@ -178,7 +240,9 @@ function main() {
   const runs = collectRuns();
   const content = buildDashboard(runs);
   fs.writeFileSync(OUTPUT, content);
+  writeCsv(runs);
   console.log(`Dashboard written: ${OUTPUT}`);
+  console.log(`Dashboard CSV written: ${OUTPUT_CSV}`);
   console.log(`Runs analyzed: ${runs.length}`);
 }
 

@@ -2,13 +2,13 @@
 
 ReviewOps Copilot for pull requests. `review-os` shifts teams from implementation-heavy flow to structured review across Engineering, Product, Design, and Security.
 
-## Latest Update (v0.1.1)
+## Latest Update (v0.1.3)
 
-- Added path-based policy overrides (`path_overrides`) for stricter sensitive-path controls
-- Added required reviewer enforcement per path (`required_users`, `required_teams`)
-- Added CODEOWNERS-aware reviewer suggestions and optional auto-request
-- Added trend dashboard generation from review history
-- Fixed GitHub 422 edge case by preventing PR-author reviewer requests
+- Added policy presets (`startup`, `fintech`, `enterprise`)
+- Added governance hardening via config hash lock + optional HMAC signature verification
+- Added alert routing rules + deduplication window support
+- Added GitHub Actions step summary output
+- Added dashboard chart visuals + CSV export (`docs/review-dashboard.csv`)
 
 ## What it does
 
@@ -22,8 +22,11 @@ ReviewOps Copilot for pull requests. `review-os` shifts teams from implementatio
 - Supports per-path required user/team reviewer policies
 - Optionally fails CI when critical findings are present
 - Sends optional Slack/Discord alerts on critical findings
+- Supports alert deduplication and route-based channel selection
 - Stores review memory in `.reviewos/history/*.json`
+- Writes machine-readable latest report to `.reviewos/last-report.json`
 - Generates trend dashboard `docs/review-dashboard.md`
+- Exports dashboard dataset as CSV `docs/review-dashboard.csv`
 - Publishes dashboard to GitHub Pages via workflow
 
 ## Quick start
@@ -48,10 +51,18 @@ Use `.reviewos.yml`:
 - `alerts.enabled` enable Slack/Discord critical alerts
 - `alerts.slack_webhook_env` env var name for Slack webhook
 - `alerts.discord_webhook_env` env var name for Discord webhook
+- `alerts.dedupe_window_minutes` suppress duplicate alerts for recurring findings
+- `alerts.routes` map severity/lens rules to channels
+- `policy_preset` quick baseline (`startup`, `fintech`, `enterprise`)
+- `governance.policy_lock` enforce config SHA-256 hash check
+- `governance.signature` optional HMAC signature for signed config
 
 CI env override:
 
 - `FAIL_ON_CRITICAL=true|false`
+- `REVIEW_OS_POLICY_PRESET=startup|fintech|enterprise`
+- `REVIEW_OS_POLICY_SHA256=<sha256>`
+- `REVIEW_OS_CONFIG_SIGNATURE=<hmac-hex>`
 
 ## Local simulation
 
@@ -84,6 +95,8 @@ node scripts/build-dashboard.mjs
 ```
 
 Output: `docs/review-dashboard.md`
+
+Also writes: `docs/review-dashboard.csv`
 
 ## Publish dashboard (Pages)
 

@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.1.3
+
+- Added policy presets for `startup`, `fintech`, and `enterprise`
+- Added governance hardening via policy lock and optional signed config validation
+- Added alert routing rules and deduplication windows
+- Added GitHub Step Summary output
+- Added machine-readable review report output (`.reviewos/last-report.json`)
+- Added dashboard chart visuals and CSV export (`docs/review-dashboard.csv`)
+
 ## v0.1.2
 
 - Added critical alert integrations (Slack/Discord webhook support)

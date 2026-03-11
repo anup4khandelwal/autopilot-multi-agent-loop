@@ -1,8 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 
 const MARKER = "<!-- review-os:pr-review -->";
 const HISTORY_DIR = ".reviewos/history";
+const REPORT_PATH = ".reviewos/last-report.json";
 
 function clamp(v, min = 0, max = 100) {
   return Math.max(min, Math.min(max, v));
@@ -19,11 +21,88 @@ function ensureDir(dirPath) {
 
 function parseScalar(value) {
   const trimmed = value.trim();
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    return trimmed.slice(1, -1);
+  }
   if (trimmed === "true") return true;
   if (trimmed === "false") return false;
   if (!Number.isNaN(Number(trimmed)) && trimmed !== "") return Number(trimmed);
   return trimmed;
 }
+
+function splitList(value) {
+  return String(value || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function deepMerge(base, ext) {
+  if (Array.isArray(base) || Array.isArray(ext)) return ext ?? base;
+  if (!base || typeof base !== "object") return ext;
+  if (!ext || typeof ext !== "object") return base;
+  const out = { ...base };
+  for (const [key, value] of Object.entries(ext)) {
+    if (value && typeof value === "object" && !Array.isArray(value) && out[key] && typeof out[key] === "object" && !Array.isArray(out[key])) {
+      out[key] = deepMerge(out[key], value);
+    } else {
+      out[key] = value;
+    }
+  }
+  return out;
+}
+
+const POLICY_PRESETS = {
+  startup: {
+    max_iterations: 2,
+    fail_on_critical: false,
+    thresholds: {
+      engineering_warning: 65,
+      product_warning: 65,
+      design_warning: 70,
+      security_warning: 70,
+    },
+  },
+  fintech: {
+    max_iterations: 4,
+    fail_on_critical: true,
+    thresholds: {
+      engineering_warning: 75,
+      product_warning: 75,
+      design_warning: 78,
+      security_warning: 85,
+    },
+    path_overrides: {
+      payments:
+        {
+          pattern: "src/payments/*",
+          engineering_penalty: 8,
+          security_penalty: 12,
+          require_tests: true,
+          missing_tests_security_penalty: 30,
+          require_tests_message: "Payments changes must include tests.",
+        },
+    },
+  },
+  enterprise: {
+    max_iterations: 4,
+    fail_on_critical: true,
+    thresholds: {
+      engineering_warning: 72,
+      product_warning: 72,
+      design_warning: 76,
+      security_warning: 82,
+    },
+    reviewer_routing: {
+      enabled: true,
+      auto_request: true,
+      max_reviewers: 4,
+    },
+  },
+};
 
 function loadConfig(configPath = ".reviewos.yml") {
   const defaults = {
@@ -45,6 +124,16 @@ function loadConfig(configPath = ".reviewos.yml") {
       enabled: false,
       slack_webhook_env: "SLACK_WEBHOOK_URL",
       discord_webhook_env: "DISCORD_WEBHOOK_URL",
+      dedupe_window_minutes: 60,
+      dedupe_state_file: ".reviewos/alerts-state.json",
+      routes: {},
+    },
+    policy_preset: "",
+    governance: {
+      policy_lock: false,
+      expected_sha256: "",
+      signature: "",
+      signature_secret_env: "REVIEW_OS_SIGNATURE_SECRET",
     },
     path_overrides: {},
   };
@@ -110,6 +199,11 @@ function loadConfig(configPath = ".reviewos.yml") {
       parsed[section][key] = parseScalar(rawValue);
       subsection = null;
     }
+  }
+
+  const presetName = String(process.env.REVIEW_OS_POLICY_PRESET || parsed.policy_preset || "").trim().toLowerCase();
+  if (presetName && POLICY_PRESETS[presetName]) {
+    return deepMerge(parsed, POLICY_PRESETS[presetName]);
   }
 
   return parsed;
@@ -259,6 +353,39 @@ function saveHistory(repoSlug, prNumber, entry) {
   const next = [...prev.slice(-9), entry];
   fs.writeFileSync(file, JSON.stringify(next, null, 2));
   return file;
+}
+
+function hashConfigFile(configPath) {
+  const content = fs.readFileSync(configPath);
+  return crypto.createHash("sha256").update(content).digest("hex");
+}
+
+function verifyConfigGovernance(configPath, config) {
+  const governance = config.governance || {};
+  const policyLockEnabled = governance.policy_lock || String(process.env.REVIEW_OS_POLICY_LOCK || "").toLowerCase() === "true";
+  if (!policyLockEnabled && !governance.signature && !process.env.REVIEW_OS_CONFIG_SIGNATURE) return;
+
+  if (!fs.existsSync(configPath)) throw new Error(`Config file not found for governance check: ${configPath}`);
+  const actualHash = hashConfigFile(configPath);
+
+  if (policyLockEnabled) {
+    const configuredHash = typeof governance.expected_sha256 === "string" ? governance.expected_sha256 : "";
+    const expectedHash = String(process.env.REVIEW_OS_POLICY_SHA256 || configuredHash || "").trim().toLowerCase();
+    if (!expectedHash) throw new Error("Policy lock enabled but expected hash is missing (REVIEW_OS_POLICY_SHA256 or governance.expected_sha256).");
+    if (actualHash !== expectedHash) {
+      throw new Error(`Policy lock failed: config hash mismatch. expected=${expectedHash} actual=${actualHash}`);
+    }
+  }
+
+  const configuredSig = typeof governance.signature === "string" ? governance.signature : "";
+  const signature = String(process.env.REVIEW_OS_CONFIG_SIGNATURE || configuredSig || "").trim().toLowerCase();
+  if (!signature) return;
+  const secretEnv = String(governance.signature_secret_env || "REVIEW_OS_SIGNATURE_SECRET");
+  const secret = process.env[secretEnv];
+  if (!secret) throw new Error(`Config signature present but secret is missing in env '${secretEnv}'.`);
+  const content = fs.readFileSync(configPath);
+  const expectedSig = crypto.createHmac("sha256", secret).update(content).digest("hex");
+  if (expectedSig !== signature) throw new Error("Config signature verification failed.");
 }
 
 function addRecurringSignals(findings, history) {
@@ -655,10 +782,54 @@ async function sendCriticalAlerts({ config, repoSlug, pr, result }) {
   const summaryLines = result.grouped.critical.map((f) => `- ${f.lens}: ${f.message}`).join("\n");
   const prUrl = pr.html_url || `https://github.com/${repoSlug}/pull/${pr.number}`;
   const sent = [];
+  const statePath = String(config.alerts.dedupe_state_file || ".reviewos/alerts-state.json");
+  const dedupeWindowMs = Math.max(0, Number(config.alerts.dedupe_window_minutes || 60)) * 60 * 1000;
+  const state = fs.existsSync(statePath) ? JSON.parse(fs.readFileSync(statePath, "utf8") || "{}") : {};
+  const criticalSignature = crypto.createHash("sha1").update(summaryLines).digest("hex").slice(0, 12);
+
+  function shouldSend(channel, route = "default") {
+    const now = Date.now();
+    const key = `${channel}|${route}|${repoSlug}|pr-${pr.number}|${criticalSignature}`;
+    const lastTs = Number(state[key] || 0);
+    if (dedupeWindowMs > 0 && now - lastTs < dedupeWindowMs) return false;
+    state[key] = now;
+    return true;
+  }
+
+  function matchedChannels() {
+    const routes = config.alerts?.routes || {};
+    const out = new Set();
+    const critical = result.grouped.critical || [];
+    for (const [routeName, route] of Object.entries(routes)) {
+      const routeSeverity = String(route.severity || "critical").toLowerCase();
+      const routeLenses = splitList(route.lens_contains).map((s) => s.toLowerCase());
+      const routeMessage = String(route.message_contains || "").toLowerCase();
+      const routeChannels = splitList(route.channels).map((s) => s.toLowerCase());
+      const hit = critical.some((f) => {
+        const sevOk = !routeSeverity || String(f.severity || "").toLowerCase() === routeSeverity;
+        const lensOk = routeLenses.length === 0 || routeLenses.some((x) => String(f.lens || "").toLowerCase().includes(x));
+        const msgOk = !routeMessage || String(f.message || "").toLowerCase().includes(routeMessage);
+        return sevOk && lensOk && msgOk;
+      });
+      if (hit) {
+        for (const c of routeChannels) out.add(`${c}:${routeName}`);
+      }
+    }
+
+    if (out.size === 0) {
+      if (process.env[String(config.alerts.slack_webhook_env || "SLACK_WEBHOOK_URL")]) out.add("slack:default");
+      if (process.env[String(config.alerts.discord_webhook_env || "DISCORD_WEBHOOK_URL")]) out.add("discord:default");
+    }
+    return [...out];
+  }
+
+  const channels = matchedChannels();
 
   const slackEnv = String(config.alerts.slack_webhook_env || "SLACK_WEBHOOK_URL");
   const slackUrl = process.env[slackEnv];
-  if (slackUrl) {
+  if (slackUrl && channels.some((c) => c.startsWith("slack:"))) {
+    const route = (channels.find((c) => c.startsWith("slack:")) || "slack:default").split(":")[1];
+    if (shouldSend("slack", route)) {
     await fetch(slackUrl, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -667,11 +838,14 @@ async function sendCriticalAlerts({ config, repoSlug, pr, result }) {
       }),
     });
     sent.push("slack");
+    }
   }
 
   const discordEnv = String(config.alerts.discord_webhook_env || "DISCORD_WEBHOOK_URL");
   const discordUrl = process.env[discordEnv];
-  if (discordUrl) {
+  if (discordUrl && channels.some((c) => c.startsWith("discord:"))) {
+    const route = (channels.find((c) => c.startsWith("discord:")) || "discord:default").split(":")[1];
+    if (shouldSend("discord", route)) {
     await fetch(discordUrl, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -680,9 +854,47 @@ async function sendCriticalAlerts({ config, repoSlug, pr, result }) {
       }),
     });
     sent.push("discord");
+    }
   }
 
+  ensureDir(path.dirname(statePath));
+  fs.writeFileSync(statePath, JSON.stringify(state, null, 2));
   return { sent };
+}
+
+function writeStepSummary({ pr, result, nextSteps, reviewerRouting, requiredCoverage, matchedRules }) {
+  const summaryPath = process.env.GITHUB_STEP_SUMMARY;
+  if (!summaryPath) return;
+
+  const lines = [
+    "## ReviewOS Summary",
+    "",
+    `- PR: #${pr.number} ${pr.title}`,
+    `- Merge readiness: **${result.mergeReadiness}/100**`,
+    `- Loop iterations: ${result.iteration}`,
+    "",
+    "| Lens | Score |",
+    "|---|---:|",
+    `| Engineering | ${result.scores.engineering} |`,
+    `| Product | ${result.scores.product} |`,
+    `| Design | ${result.scores.design} |`,
+    `| Security | ${result.scores.security} |`,
+    "",
+    `- Critical findings: ${result.grouped.critical.length}`,
+    `- Warning findings: ${result.grouped.warning.length}`,
+    `- Info findings: ${result.grouped.info.length}`,
+    `- Suggested reviewers (users): ${reviewerRouting.users.join(", ") || "none"}`,
+    `- Suggested reviewers (teams): ${reviewerRouting.teams.join(", ") || "none"}`,
+    `- Missing required users: ${requiredCoverage.missing.users.join(", ") || "none"}`,
+    `- Missing required teams: ${requiredCoverage.missing.teams.join(", ") || "none"}`,
+    `- Matched path rules: ${matchedRules.map((r) => `${r.name}(${r.count})`).join(", ") || "none"}`,
+    "",
+    "### Next Steps",
+    ...nextSteps.map((s) => `- ${s}`),
+    "",
+  ];
+
+  fs.appendFileSync(summaryPath, `${lines.join("\n")}\n`);
 }
 
 function readMock(pathVar) {
@@ -696,6 +908,7 @@ async function main() {
   const token = process.env.GITHUB_TOKEN;
   const configPath = process.env.REVIEW_OS_CONFIG || ".reviewos.yml";
   const config = loadConfig(configPath);
+  if (fs.existsSync(configPath)) verifyConfigGovernance(configPath, config);
 
   const failOnCriticalEnv = process.env.FAIL_ON_CRITICAL;
   const failOnCritical = failOnCriticalEnv ? failOnCriticalEnv.toLowerCase() === "true" : Boolean(config.fail_on_critical);
@@ -804,6 +1017,33 @@ async function main() {
       matchedRules: result.matchedPathRules || [],
     },
   };
+
+  ensureDir(path.dirname(REPORT_PATH));
+  fs.writeFileSync(
+    REPORT_PATH,
+    JSON.stringify(
+      {
+        timestamp: new Date().toISOString(),
+        repository: repoSlug,
+        pr: { number: pr.number, title: pr.title, url: pr.html_url || "" },
+        mergeReadiness: result.mergeReadiness,
+        scores: result.scores,
+        grouped: result.grouped,
+        nextSteps,
+        reviewerRouting: {
+          enabled: reviewerRouting.enabled,
+          users: reviewerRouting.users,
+          teams: reviewerRouting.teams,
+          autoRequest: reviewerRouting.autoRequest,
+          requestedViaRequired,
+        },
+        requiredCoverage,
+        matchedPathRules: result.matchedPathRules || [],
+      },
+      null,
+      2
+    )
+  );
   const historyFilePath = saveHistory(repoSlug, pr.number, historyEntry);
 
   if (process.env.DRY_RUN_COMMENT === "1" || mockPr) {
@@ -833,6 +1073,15 @@ async function main() {
       console.log(`Alerts sent: ${alertResult.sent.join(",")}`);
     }
   }
+
+  writeStepSummary({
+    pr,
+    result,
+    nextSteps,
+    reviewerRouting,
+    requiredCoverage,
+    matchedRules: result.matchedPathRules || [],
+  });
 
   if (failOnCritical && result.grouped.critical.length > 0) {
     console.error(`Critical findings present (${result.grouped.critical.length}). Failing job.`);

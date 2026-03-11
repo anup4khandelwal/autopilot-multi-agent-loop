@@ -13,6 +13,7 @@ thresholds:
 
 max_iterations: 3
 fail_on_critical: true
+policy_preset: startup
 
 reviewer_routing:
   enabled: true
@@ -23,6 +24,20 @@ alerts:
   enabled: false
   slack_webhook_env: SLACK_WEBHOOK_URL
   discord_webhook_env: DISCORD_WEBHOOK_URL
+  dedupe_window_minutes: 60
+  dedupe_state_file: .reviewos/alerts-state.json
+  # optional targeted routing (comma-separated values):
+  # routes:
+  #   security_critical:
+  #     severity: critical
+  #     lens_contains: Security,PathPolicy
+  #     channels: slack,discord
+
+governance:
+  policy_lock: false
+  expected_sha256: ""
+  signature: ""
+  signature_secret_env: REVIEW_OS_SIGNATURE_SECRET
 
 path_overrides:
   auth_paths:

@@ -1,6 +1,7 @@
 import fs from "node:fs";
 
 const INPUT = "docs/review-dashboard.md";
+const CSV = "docs/review-dashboard.csv";
 const OUT_DIR = "site";
 const OUTPUT = `${OUT_DIR}/index.html`;
 
@@ -10,6 +11,9 @@ const escaped = markdown
   .replace(/&/g, "&amp;")
   .replace(/</g, "&lt;")
   .replace(/>/g, "&gt;");
+
+const csvExists = fs.existsSync(CSV);
+const csvLink = csvExists ? `<div class="meta"><a href="./review-dashboard.csv">Download CSV</a></div>` : "";
 
 const html = `<!doctype html>
 <html lang="en">
@@ -29,6 +33,7 @@ const html = `<!doctype html>
   <div class="wrap">
     <h1>ReviewOS Dashboard</h1>
     <div class="meta">Source: docs/review-dashboard.md</div>
+    ${csvLink}
     <pre>${escaped}</pre>
   </div>
 </body>
@@ -36,4 +41,7 @@ const html = `<!doctype html>
 
 fs.mkdirSync(OUT_DIR, { recursive: true });
 fs.writeFileSync(OUTPUT, html);
+if (csvExists) {
+  fs.copyFileSync(CSV, `${OUT_DIR}/review-dashboard.csv`);
+}
 console.log(`Site written: ${OUTPUT}`);
