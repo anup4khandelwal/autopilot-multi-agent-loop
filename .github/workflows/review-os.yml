@@ -39,7 +39,9 @@ jobs:
 
       - name: Build review dashboard
         if: always()
-        run: node scripts/build-dashboard.mjs
+        run: |
+          node scripts/build-dashboard.mjs
+          node scripts/build-ownership-report.mjs
 
       - name: Upload Review Memory
         if: always()
@@ -80,4 +82,6 @@ jobs:
             docs/review-dashboard.md
             docs/review-dashboard.csv
             docs/repo-baseline.csv
+            docs/finding-ownership.md
+            docs/finding-ownership.csv
           if-no-files-found: ignore

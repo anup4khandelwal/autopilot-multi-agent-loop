@@ -36,6 +36,12 @@ reviewer_sla:
   threshold_hours: 24
   cooldown_hours: 12
 
+incident_safe:
+  enabled: false
+  security_penalty_multiplier: 1.4
+  require_tests_on_sensitive: true
+  min_approvals: 1
+
 alerts:
   enabled: false
   slack_webhook_env: SLACK_WEBHOOK_URL
@@ -63,6 +69,19 @@ release_gate:
   enabled: true
   title_regex: "^release[:\\s]|^chore\\(release\\):"
   base_branch_regex: "^main$|^release\\/.*$"
+
+finding_ownership:
+  default_owner: platform
+  rules:
+    security_team:
+      lens_contains: Security,PathPolicy,IncidentMode
+      owner: security
+    product_team:
+      lens_contains: Product,Design
+      owner: product
+    platform_team:
+      lens_contains: Engineering,ReviewerPolicy,Memory,Trend
+      owner: platform
 
 path_overrides:
   auth_paths:

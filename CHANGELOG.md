@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.1.6
+
+- Added incident-safe mode with amplified security penalties and required approval checks
+- Added pre-merge checklist generation in PR comments and GitHub step summary
+- Added finding ownership mapping and ownership report exports (`docs/finding-ownership.*`)
+
 ## v0.1.5
 
 - Added actionable fix suggestions in ReviewOS PR comments

@@ -22,7 +22,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Build dashboard markdown
-        run: node scripts/build-dashboard.mjs
+        run: |
+          node scripts/build-dashboard.mjs
+          node scripts/build-ownership-report.mjs
 
       - name: Render dashboard site
         run: node scripts/render-dashboard-site.mjs

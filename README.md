@@ -2,13 +2,11 @@
 
 ReviewOps Copilot for pull requests. `review-os` shifts teams from implementation-heavy flow to structured review across Engineering, Product, Design, and Security.
 
-## Latest Update (v0.1.5)
+## Latest Update (v0.1.6)
 
-- Added actionable fix suggestions in PR report for top findings
-- Added reviewer SLA reminder bot (scheduled workflow + cooldown handling)
-- Added multi-repo baseline comparison in dashboard output
-- Added prompt-trace capture per lens to `.reviewos/traces/*.json`
-- Added auto release gate enforcement for release PRs with unresolved critical findings
+- Added incident-safe mode with stronger security penalties and mandatory approval checks
+- Added dynamic pre-merge checklist generation in PR comments and step summaries
+- Added finding ownership mapping with exportable ownership reports
 
 ## What it does
 
@@ -29,6 +27,8 @@ ReviewOps Copilot for pull requests. `review-os` shifts teams from implementatio
 - Writes machine-readable latest report to `.reviewos/last-report.json`
 - Exports SARIF findings for security scanning integrations
 - Captures structured scoring traces for each lens
+- Supports incident-safe review mode for stricter merge safety during incidents
+- Exports finding ownership reports (`docs/finding-ownership.md`, `docs/finding-ownership.csv`)
 - Generates trend dashboard `docs/review-dashboard.md`
 - Exports dashboard dataset as CSV `docs/review-dashboard.csv`
 - Publishes dashboard to GitHub Pages via workflow
@@ -56,6 +56,8 @@ Use `.reviewos.yml`:
 - `labels.critical_label|security_label|ready_label` managed labels
 - `fix_suggestions.enabled|max_items` include remediation hints in PR report
 - `reviewer_sla.enabled|threshold_hours|cooldown_hours` reminder policy
+- `incident_safe.enabled|security_penalty_multiplier|min_approvals` incident enforcement
+- `finding_ownership.default_owner|rules` team mapping for findings
 - `path_overrides` apply path-based penalties and test requirements
 - `alerts.enabled` enable Slack/Discord critical alerts
 - `alerts.slack_webhook_env` env var name for Slack webhook
@@ -109,6 +111,8 @@ Output: `docs/review-dashboard.md`
 
 Also writes: `docs/review-dashboard.csv`
 Also writes: `docs/repo-baseline.csv`
+Also writes: `docs/finding-ownership.md`
+Also writes: `docs/finding-ownership.csv`
 
 ## Publish dashboard (Pages)
 
@@ -125,6 +129,7 @@ It will:
 - `.github/workflows/review-os.yml`
   - PR review loop
   - dashboard build
+  - ownership report build
   - SARIF generation/upload
   - prompt trace artifact upload
   - release gate enforcement

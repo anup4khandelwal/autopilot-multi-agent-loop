@@ -16,10 +16,17 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Build dashboard
-        run: node scripts/build-dashboard.mjs
+        run: |
+          node scripts/build-dashboard.mjs
+          node scripts/build-ownership-report.mjs
 
       - name: Upload dashboard artifact
         uses: actions/upload-artifact@v4
         with:
           name: reviewos-dashboard-${{ github.run_id }}
-          path: docs/review-dashboard.md
+          path: |
+            docs/review-dashboard.md
+            docs/review-dashboard.csv
+            docs/repo-baseline.csv
+            docs/finding-ownership.md
+            docs/finding-ownership.csv

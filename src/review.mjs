@@ -138,6 +138,16 @@ function loadConfig(configPath = ".reviewos.yml") {
       threshold_hours: 24,
       cooldown_hours: 12,
     },
+    incident_safe: {
+      enabled: false,
+      security_penalty_multiplier: 1.4,
+      require_tests_on_sensitive: true,
+      min_approvals: 1,
+    },
+    finding_ownership: {
+      default_owner: "unassigned",
+      rules: {},
+    },
     alerts: {
       enabled: false,
       slack_webhook_env: "SLACK_WEBHOOK_URL",
@@ -176,9 +186,11 @@ function loadConfig(configPath = ".reviewos.yml") {
     labels: { ...defaults.labels },
     fix_suggestions: { ...defaults.fix_suggestions },
     reviewer_sla: { ...defaults.reviewer_sla },
+    incident_safe: { ...defaults.incident_safe },
     alerts: { ...defaults.alerts },
     prompt_trace: { ...defaults.prompt_trace },
     release_gate: { ...defaults.release_gate },
+    finding_ownership: { ...defaults.finding_ownership },
     path_overrides: { ...defaults.path_overrides },
   };
 
@@ -535,11 +547,21 @@ function runAgentLoop({ pr, files, config, repoSlug }) {
     const design = scoreDesign(body, files);
     const security = scoreSecurity(files, eng);
     const override = applyPathOverrides({ files, config, hasTests: eng.hasTests });
-    const scores = {
+    const baseScores = {
       engineering: clamp(eng.score - override.adjustments.engineering),
       product: clamp(product.score - override.adjustments.product),
       design: clamp(design.score - override.adjustments.design),
       security: clamp(security.score - override.adjustments.security),
+    };
+    const incidentAdjust = applyIncidentMode({
+      config,
+      securityScore: baseScores.security,
+      securitySensitiveCount: security.sensitiveCount || 0,
+      hasTests: eng.hasTests,
+    });
+    const scores = {
+      ...baseScores,
+      security: incidentAdjust.securityScore,
     };
 
     let findings = dedupeFindings([
@@ -548,6 +570,7 @@ function runAgentLoop({ pr, files, config, repoSlug }) {
       ...design.findings,
       ...security.findings,
       ...override.findings,
+      ...incidentAdjust.findings,
     ]);
     findings = addRecurringSignals(findings, history);
 
@@ -784,6 +807,90 @@ function computeMissingRequired(required, current, prAuthor = "") {
   return { users: missingUsers, teams: missingTeams };
 }
 
+function applyIncidentMode({ config, securityScore, securitySensitiveCount, hasTests }) {
+  if (!config.incident_safe?.enabled) {
+    return { securityScore, findings: [] };
+  }
+
+  const findings = [];
+  const multiplier = Math.max(1, Number(config.incident_safe?.security_penalty_multiplier || 1.4));
+  const penaltyBase = 100 - securityScore;
+  const extraPenalty = Math.round(penaltyBase * (multiplier - 1));
+  let nextScore = clamp(securityScore - extraPenalty);
+
+  findings.push({
+    severity: "warning",
+    lens: "IncidentMode",
+    message: `Incident-safe mode enabled. Security penalties multiplied by ${multiplier.toFixed(2)}x.`,
+  });
+
+  if (securitySensitiveCount > 0 && config.incident_safe?.require_tests_on_sensitive && !hasTests) {
+    nextScore = clamp(nextScore - 10);
+    findings.push({
+      severity: "critical",
+      lens: "IncidentMode",
+      message: "Sensitive changes during incident mode require test updates.",
+    });
+  }
+
+  return { securityScore: nextScore, findings };
+}
+
+function resolveFindingOwner(finding, files, config) {
+  const ownership = config.finding_ownership || {};
+  const rules = ownership.rules || {};
+  const fileNames = files.map((f) => String(f.filename || "").toLowerCase());
+
+  for (const [, rule] of Object.entries(rules)) {
+    if (!rule || typeof rule !== "object") continue;
+    const owner = String(rule.owner || "").trim();
+    if (!owner) continue;
+
+    const lensContains = splitList(rule.lens_contains).map((s) => s.toLowerCase());
+    const messageContains = String(rule.message_contains || "").toLowerCase();
+    const pathContains = splitList(rule.path_contains).map((s) => s.toLowerCase());
+
+    const lensOk =
+      lensContains.length === 0 || lensContains.some((needle) => String(finding.lens || "").toLowerCase().includes(needle));
+    const messageOk = !messageContains || String(finding.message || "").toLowerCase().includes(messageContains);
+    const pathOk =
+      pathContains.length === 0 || pathContains.some((needle) => fileNames.some((name) => name.includes(needle)));
+
+    if (lensOk && messageOk && pathOk) return owner;
+  }
+
+  return String(ownership.default_owner || "unassigned");
+}
+
+function applyFindingOwnership(findings, files, config) {
+  return findings.map((f) => ({ ...f, owner: resolveFindingOwner(f, files, config) }));
+}
+
+function buildPreMergeChecklist({ result, files, requiredCoverage, config, approvalCount }) {
+  const items = [];
+  const hasSensitiveFiles = files.some((f) => /auth|oauth|jwt|session|permission|secret|token|payment|billing|workflow|terraform|k8s/i.test(f.filename));
+  const hasTests = !result.findings.some((f) => /No test file changes detected|require test updates/i.test(f.message));
+  const hasUiWarning = result.findings.some((f) => f.lens === "Design" && /without UI evidence/i.test(f.message));
+
+  items.push({ done: result.grouped.critical.length === 0, text: "All critical findings resolved." });
+  items.push({
+    done: requiredCoverage.missing.users.length + requiredCoverage.missing.teams.length === 0,
+    text: "Required users/teams are assigned for review.",
+  });
+  items.push({ done: !hasSensitiveFiles || hasTests, text: "Sensitive changes include test updates." });
+  items.push({ done: !hasUiWarning, text: "UI-impacting changes include screenshot/UX evidence." });
+
+  if (config.incident_safe?.enabled) {
+    const minApprovals = Math.max(1, Number(config.incident_safe?.min_approvals || 1));
+    items.push({
+      done: approvalCount >= minApprovals,
+      text: `Incident mode requires at least ${minApprovals} approval(s).`,
+    });
+  }
+
+  return items;
+}
+
 function isReleasePr(pr, config) {
   const title = String(pr.title || "");
   const baseRef = String(pr.base?.ref || "");
@@ -856,7 +963,7 @@ function buildNextSteps(result, config) {
   return nextSteps;
 }
 
-function buildComment({ pr, result, nextSteps, reviewerRouting, requiredCoverage, fixSuggestions = [] }) {
+function buildComment({ pr, result, nextSteps, reviewerRouting, requiredCoverage, fixSuggestions = [], checklist = [] }) {
   const fmt = (items, icon) => (items.length ? items.map((f) => `- ${icon} **${f.lens}**: ${f.message}`).join("\n") : "- None");
 
   const reviewersSection = reviewerRouting.enabled
@@ -872,6 +979,9 @@ function buildComment({ pr, result, nextSteps, reviewerRouting, requiredCoverage
     : "";
   const fixSection = fixSuggestions.length
     ? `### Actionable Fix Suggestions\n${fixSuggestions.map((s) => `- **${s.title}**\n\n\`\`\`text\n${s.patch}\n\`\`\``).join("\n")}`
+    : "";
+  const checklistSection = checklist.length
+    ? `### Pre-Merge Checklist\n${checklist.map((c) => `- [${c.done ? "x" : " "}] ${c.text}`).join("\n")}`
     : "";
 
   return `${MARKER}
@@ -896,6 +1006,8 @@ ${requiredSection}
 ${deltaSection}
 
 ${fixSection}
+
+${checklistSection}
 
 ### Findings
 
@@ -1156,7 +1268,7 @@ async function sendCriticalAlerts({ config, repoSlug, pr, result }) {
   return { sent };
 }
 
-function writeStepSummary({ pr, result, nextSteps, reviewerRouting, requiredCoverage, matchedRules }) {
+function writeStepSummary({ pr, result, nextSteps, reviewerRouting, requiredCoverage, matchedRules, checklist = [] }) {
   const summaryPath = process.env.GITHUB_STEP_SUMMARY;
   if (!summaryPath) return;
 
@@ -1188,6 +1300,9 @@ function writeStepSummary({ pr, result, nextSteps, reviewerRouting, requiredCove
     "",
     "### Next Steps",
     ...nextSteps.map((s) => `- ${s}`),
+    "",
+    "### Pre-Merge Checklist",
+    ...(checklist.length ? checklist.map((c) => `- [${c.done ? "x" : " "}] ${c.text}`) : ["- None"]),
     "",
   ];
 
@@ -1274,6 +1389,7 @@ async function main() {
   const required = result.requiredReviewers || { users: [], teams: [] };
   let currentCoverage = collectCurrentReviewers(pr);
   let requestedViaRequired = false;
+  const approvalCount = (reviews || []).filter((r) => String(r.state || "").toUpperCase() === "APPROVED").length;
 
   let missingRequired = computeMissingRequired(required, currentCoverage, prAuthor);
   const shouldRequest = reviewerRouting.enabled && reviewerRouting.autoRequest && !mockPr;
@@ -1314,12 +1430,53 @@ async function main() {
     nextSteps.unshift("Add missing required reviewers from path policy rules.");
   }
 
+  if (config.incident_safe?.enabled) {
+    const minApprovals = Math.max(1, Number(config.incident_safe?.min_approvals || 1));
+    if (approvalCount < minApprovals) {
+      result.findings = dedupeFindings([
+        ...result.findings,
+        {
+          severity: "critical",
+          lens: "IncidentMode",
+          message: `Incident-safe mode requires ${minApprovals} approval(s); current approvals: ${approvalCount}.`,
+        },
+      ]);
+      result.grouped = summarizeFindings(result.findings);
+      result.scores.security = clamp(result.scores.security - 10);
+      result.mergeReadiness = Math.round(
+        result.scores.engineering * Number(config.weights.engineering) +
+          result.scores.product * Number(config.weights.product) +
+          result.scores.design * Number(config.weights.design) +
+          result.scores.security * Number(config.weights.security)
+      );
+      nextSteps.unshift("Add required approvals to satisfy incident-safe mode.");
+    }
+  }
+
+  result.findings = applyFindingOwnership(result.findings, files, config);
+  result.grouped = summarizeFindings(result.findings);
+
   const requiredCoverage = {
     required,
     missing: missingRequired,
   };
+  const checklist = buildPreMergeChecklist({
+    result,
+    files,
+    requiredCoverage,
+    config,
+    approvalCount,
+  });
 
-  const comment = buildComment({ pr, result, nextSteps, reviewerRouting, requiredCoverage, fixSuggestions });
+  const comment = buildComment({
+    pr,
+    result,
+    nextSteps,
+    reviewerRouting,
+    requiredCoverage,
+    fixSuggestions,
+    checklist,
+  });
   const autoRequestAttempted = reviewerRouting.enabled && reviewerRouting.autoRequest;
   const approvedByReviewer = (reviews || []).some((r) => String(r.state || "").toUpperCase() === "APPROVED");
   const prAgeHours = pr.created_at ? Math.max(0, (Date.now() - new Date(pr.created_at).getTime()) / (1000 * 60 * 60)) : 0;
@@ -1343,6 +1500,8 @@ async function main() {
     },
     delta: result.delta || { added: [], resolved: [] },
     promptTracePath: "",
+    checklist,
+    approvalCount,
     sla: {
       enabled: Boolean(config.reviewer_sla?.enabled),
       approvedByReviewer,
@@ -1384,6 +1543,7 @@ async function main() {
         matchedPathRules: result.matchedPathRules || [],
         fixSuggestions,
         promptTracePath: historyEntry.promptTracePath,
+        checklist,
       },
       null,
       2
@@ -1466,6 +1626,7 @@ async function main() {
     reviewerRouting,
     requiredCoverage,
     matchedRules: result.matchedPathRules || [],
+    checklist,
   });
 
   if (failOnCritical && result.grouped.critical.length > 0) {
