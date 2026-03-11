@@ -175,6 +175,22 @@ function buildDashboard(runs) {
   const readinessBars = recent
     .map((r) => `- ${(r.timestamp || "").slice(0, 19)} PR#${r.pr}: ${bar(Number(r.mergeReadiness || 0))}`)
     .join("\n");
+  const anomalies = [];
+  for (let i = 3; i < runs.length; i += 1) {
+    const baselineItems = [runs[i - 1], runs[i - 2], runs[i - 3]].map((x) => Number(x.mergeReadiness || 0));
+    const baseline = avg(baselineItems);
+    const current = Number(runs[i].mergeReadiness || 0);
+    const drop = baseline - current;
+    if (drop >= 20) {
+      anomalies.push({
+        timestamp: runs[i].timestamp || "",
+        pr: runs[i].pr || "",
+        baseline,
+        current,
+        drop,
+      });
+    }
+  }
 
   return `# ReviewOS Trend Dashboard
 
@@ -218,6 +234,10 @@ Generated: ${generatedAt}
 ## Merge Readiness Trend (Recent 10)
 
 ${readinessBars || "No data yet."}
+
+## Readiness Anomalies
+
+${anomalies.length ? buildTable(["Timestamp", "PR", "Baseline", "Current", "Drop"], anomalies.slice(-8).reverse().map((a) => [String(a.timestamp).slice(0, 19), String(a.pr), a.baseline.toFixed(1), a.current.toFixed(1), a.drop.toFixed(1)])) : "No anomalies detected."}
 
 ## Critical by Path Policy Rule
 

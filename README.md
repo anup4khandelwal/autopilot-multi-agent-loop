@@ -2,13 +2,13 @@
 
 ReviewOps Copilot for pull requests. `review-os` shifts teams from implementation-heavy flow to structured review across Engineering, Product, Design, and Security.
 
-## Latest Update (v0.1.3)
+## Latest Update (v0.1.4)
 
-- Added policy presets (`startup`, `fintech`, `enterprise`)
-- Added governance hardening via config hash lock + optional HMAC signature verification
-- Added alert routing rules + deduplication window support
-- Added GitHub Actions step summary output
-- Added dashboard chart visuals + CSV export (`docs/review-dashboard.csv`)
+- Added risk-based reviewer routing (ranked CODEOWNERS suggestions)
+- Added PR label automation (`reviewos:critical`, `reviewos:security`, `reviewos:ready`)
+- Added SARIF security export (`.reviewos/security-findings.sarif`) + workflow upload
+- Added delta digest in PR report (added/resolved findings since previous run)
+- Added trend anomaly detection in dashboard
 
 ## What it does
 
@@ -18,13 +18,16 @@ ReviewOps Copilot for pull requests. `review-os` shifts teams from implementatio
 - Scores merge readiness (0-100)
 - Posts/upserts a structured PR comment
 - Suggests reviewers from `CODEOWNERS`
+- Prioritizes reviewers based on risky file domains
 - Optionally auto-requests reviewers via GitHub API
 - Supports per-path required user/team reviewer policies
 - Optionally fails CI when critical findings are present
 - Sends optional Slack/Discord alerts on critical findings
 - Supports alert deduplication and route-based channel selection
+- Optionally auto-manages PR labels based on review state
 - Stores review memory in `.reviewos/history/*.json`
 - Writes machine-readable latest report to `.reviewos/last-report.json`
+- Exports SARIF findings for security scanning integrations
 - Generates trend dashboard `docs/review-dashboard.md`
 - Exports dashboard dataset as CSV `docs/review-dashboard.csv`
 - Publishes dashboard to GitHub Pages via workflow
@@ -47,6 +50,9 @@ Use `.reviewos.yml`:
 - `reviewer_routing.enabled` enable CODEOWNERS suggestions
 - `reviewer_routing.auto_request` auto-request reviewers
 - `reviewer_routing.max_reviewers` cap requests
+- `reviewer_routing.risk_based` boost risky-domain owner routing
+- `labels.enabled` enable PR label automation
+- `labels.critical_label|security_label|ready_label` managed labels
 - `path_overrides` apply path-based penalties and test requirements
 - `alerts.enabled` enable Slack/Discord critical alerts
 - `alerts.slack_webhook_env` env var name for Slack webhook
@@ -113,6 +119,7 @@ It will:
 - `.github/workflows/review-os.yml`
   - PR review loop
   - dashboard build
+  - SARIF generation/upload
   - artifacts upload
 - `.github/workflows/review-os-dashboard.yml`
   - weekly dashboard build artifact

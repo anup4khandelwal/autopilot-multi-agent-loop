@@ -3,4 +3,6 @@ node_modules/
 .env
 .reviewos/history/*.json
 .reviewos/last-report.json
+.reviewos/security-findings.sarif
+.reviewos/alerts-state.json
 site/

@@ -14,6 +14,7 @@ permissions:
   contents: read
   pull-requests: write
   issues: write
+  security-events: write
 
 env:
   FAIL_ON_CRITICAL: ${{ github.event.inputs.fail_on_critical || 'true' }}
@@ -43,6 +44,20 @@ jobs:
           name: reviewos-history-${{ github.run_id }}
           path: .reviewos/history
           if-no-files-found: ignore
+
+      - name: Upload SARIF Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reviewos-sarif-${{ github.run_id }}
+          path: .reviewos/security-findings.sarif
+          if-no-files-found: ignore
+
+      - name: Upload SARIF to GitHub
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: .reviewos/security-findings.sarif
 
       - name: Upload Dashboard
         if: always()

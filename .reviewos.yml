@@ -19,6 +19,13 @@ reviewer_routing:
   enabled: true
   auto_request: true
   max_reviewers: 3
+  risk_based: true
+
+labels:
+  enabled: true
+  critical_label: reviewos:critical
+  security_label: reviewos:security
+  ready_label: reviewos:ready
 
 alerts:
   enabled: false
@@ -27,11 +34,11 @@ alerts:
   dedupe_window_minutes: 60
   dedupe_state_file: .reviewos/alerts-state.json
   # optional targeted routing (comma-separated values):
-  # routes:
-  #   security_critical:
-  #     severity: critical
-  #     lens_contains: Security,PathPolicy
-  #     channels: slack,discord
+  routes:
+    security_critical:
+      severity: critical
+      lens_contains: Security,PathPolicy
+      channels: slack,discord
 
 governance:
   policy_lock: false

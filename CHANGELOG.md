@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.1.4
+
+- Added risk-based reviewer routing with ranked CODEOWNERS suggestions
+- Added PR label automation for critical/security/ready states
+- Added SARIF export for security-centric findings and workflow upload
+- Added delta digest (added/resolved findings) in PR report
+- Added readiness anomaly detection in dashboard trends
+
 ## v0.1.3
 
 - Added policy presets for `startup`, `fintech`, and `enterprise`

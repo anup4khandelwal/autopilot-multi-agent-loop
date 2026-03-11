@@ -119,6 +119,13 @@ function loadConfig(configPath = ".reviewos.yml") {
       enabled: true,
       auto_request: false,
       max_reviewers: 3,
+      risk_based: true,
+    },
+    labels: {
+      enabled: false,
+      critical_label: "reviewos:critical",
+      security_label: "reviewos:security",
+      ready_label: "reviewos:ready",
     },
     alerts: {
       enabled: false,
@@ -146,12 +153,14 @@ function loadConfig(configPath = ".reviewos.yml") {
     weights: { ...defaults.weights },
     thresholds: { ...defaults.thresholds },
     reviewer_routing: { ...defaults.reviewer_routing },
+    labels: { ...defaults.labels },
     alerts: { ...defaults.alerts },
     path_overrides: { ...defaults.path_overrides },
   };
 
   let section = null;
   let subsection = null;
+  let subsubsection = null;
   for (const rawLine of data) {
     const line = rawLine.replace(/\t/g, "  ");
     if (!line.trim() || line.trim().startsWith("#")) continue;
@@ -164,11 +173,32 @@ function loadConfig(configPath = ".reviewos.yml") {
       if (value === "") {
         section = key;
         subsection = null;
+        subsubsection = null;
       } else {
         parsed[key] = parseScalar(value);
         section = null;
         subsection = null;
+        subsubsection = null;
       }
+      continue;
+    }
+
+    if (line.startsWith("      ")) {
+      if (!section || !subsection || !subsubsection) continue;
+      const child = line.trim();
+      const idx = child.indexOf(":");
+      if (idx === -1) continue;
+      const key = child.slice(0, idx).trim();
+      const value = parseScalar(child.slice(idx + 1).trim());
+      if (typeof parsed[section] !== "object" || parsed[section] === null) parsed[section] = {};
+      if (typeof parsed[section][subsection] !== "object" || parsed[section][subsection] === null) parsed[section][subsection] = {};
+      if (
+        typeof parsed[section][subsection][subsubsection] !== "object" ||
+        parsed[section][subsection][subsubsection] === null
+      ) {
+        parsed[section][subsection][subsubsection] = {};
+      }
+      parsed[section][subsection][subsubsection][key] = value;
       continue;
     }
 
@@ -178,10 +208,21 @@ function loadConfig(configPath = ".reviewos.yml") {
       const idx = child.indexOf(":");
       if (idx === -1) continue;
       const key = child.slice(0, idx).trim();
-      const value = parseScalar(child.slice(idx + 1).trim());
+      const rawValue = child.slice(idx + 1).trim();
       if (typeof parsed[section] !== "object" || parsed[section] === null) parsed[section] = {};
       if (typeof parsed[section][subsection] !== "object" || parsed[section][subsection] === null) parsed[section][subsection] = {};
-      parsed[section][subsection][key] = value;
+      if (rawValue === "") {
+        subsubsection = key;
+        if (
+          typeof parsed[section][subsection][subsubsection] !== "object" ||
+          parsed[section][subsection][subsubsection] === null
+        ) {
+          parsed[section][subsection][subsubsection] = {};
+        }
+      } else {
+        parsed[section][subsection][key] = parseScalar(rawValue);
+        subsubsection = null;
+      }
       continue;
     }
 
@@ -194,10 +235,12 @@ function loadConfig(configPath = ".reviewos.yml") {
     if (typeof parsed[section] !== "object" || parsed[section] === null) parsed[section] = {};
     if (rawValue === "") {
       subsection = key;
+      subsubsection = null;
       if (typeof parsed[section][subsection] !== "object" || parsed[section][subsection] === null) parsed[section][subsection] = {};
     } else {
       parsed[section][key] = parseScalar(rawValue);
       subsection = null;
+      subsubsection = null;
     }
   }
 
@@ -413,6 +456,33 @@ function addRecurringSignals(findings, history) {
   return findings;
 }
 
+function computeFindingDelta(history, findings) {
+  if (!history.length) return { added: findings, resolved: [] };
+  const prev = history.at(-1);
+  const prevFindings = Array.isArray(prev?.findings) ? prev.findings : [];
+  const prevSet = new Set(prevFindings.map((f) => `${f.severity}|${f.lens}|${f.message}`));
+  const nextSet = new Set(findings.map((f) => `${f.severity}|${f.lens}|${f.message}`));
+  const added = findings.filter((f) => !prevSet.has(`${f.severity}|${f.lens}|${f.message}`));
+  const resolved = prevFindings.filter((f) => !nextSet.has(`${f.severity}|${f.lens}|${f.message}`));
+  return { added, resolved };
+}
+
+function detectReadinessAnomaly(history, currentReadiness) {
+  const prev = history
+    .map((h) => Number(h.mergeReadiness || 0))
+    .filter((x) => Number.isFinite(x))
+    .slice(-5);
+  if (prev.length < 3) return null;
+  const baseline = prev.reduce((a, b) => a + b, 0) / prev.length;
+  const drop = baseline - Number(currentReadiness || 0);
+  if (drop < 20) return null;
+  return {
+    severity: "warning",
+    lens: "Trend",
+    message: `Merge readiness anomaly detected: current ${currentReadiness} is ${drop.toFixed(1)} below recent baseline ${baseline.toFixed(1)}.`,
+  };
+}
+
 function runAgentLoop({ pr, files, config, repoSlug }) {
   const body = pr.body || "";
   const history = loadHistory(repoSlug, pr.number);
@@ -457,21 +527,29 @@ function runAgentLoop({ pr, files, config, repoSlug }) {
       scores: [scores.engineering, scores.product, scores.design, scores.security],
     });
 
+    const anomaly = detectReadinessAnomaly(history, mergeReadiness);
+    if (anomaly) {
+      findings = dedupeFindings([...findings, anomaly]);
+    }
+    const delta = computeFindingDelta(history, findings);
+    const groupedWithSignals = summarizeFindings(findings);
+
     final = {
       iteration: i,
       scores,
-      grouped,
+      grouped: groupedWithSignals,
       findings,
       mergeReadiness,
       history,
       requiredReviewers: override.required,
       matchedPathRules: override.matchedRules,
+      delta,
     };
 
     if (signature === previousSignature) break;
     previousSignature = signature;
 
-    if (grouped.critical.length === 0 && mergeReadiness >= 90) break;
+    if (groupedWithSignals.critical.length === 0 && mergeReadiness >= 90) break;
   }
 
   return final;
@@ -529,11 +607,15 @@ function patternToRegex(pattern) {
   return new RegExp(rx);
 }
 
-function resolveReviewers(files, prAuthor, codeownerRules, maxReviewers = 3) {
+function resolveReviewers(files, prAuthor, codeownerRules, options = {}) {
+  const maxReviewers = Number(options.maxReviewers || 3);
+  const riskBased = Boolean(options.riskBased);
   if (codeownerRules.length === 0) return { users: [], teams: [] };
 
-  const users = new Set();
-  const teams = new Set();
+  const users = new Map();
+  const teams = new Map();
+  const riskyFilePattern = /auth|oauth|jwt|session|permission|payment|billing|invoice|secret|token|workflow|k8s|terraform|helm/i;
+  let riskFileCount = 0;
 
   for (const file of files) {
     let matchedOwners = [];
@@ -541,21 +623,30 @@ function resolveReviewers(files, prAuthor, codeownerRules, maxReviewers = 3) {
       const regex = patternToRegex(rule.pattern);
       if (regex.test(file.filename)) matchedOwners = rule.owners;
     }
+    const ownerWeight = riskyFilePattern.test(file.filename) ? 2 : 1;
+    if (ownerWeight > 1) riskFileCount += 1;
 
     for (const owner of matchedOwners) {
       if (!owner.startsWith("@")) continue;
       const normalized = owner.slice(1);
       if (!normalized) continue;
       if (normalized.includes("/")) {
-        teams.add(normalized);
+        teams.set(normalized, (teams.get(normalized) || 0) + ownerWeight);
       } else if (normalized !== prAuthor) {
-        users.add(normalized);
+        users.set(normalized, (users.get(normalized) || 0) + ownerWeight);
       }
     }
   }
 
-  const sortedUsers = [...users].sort().slice(0, Math.max(0, maxReviewers));
-  const sortedTeams = [...teams].sort().slice(0, Math.max(0, maxReviewers));
+  const cap = riskBased && riskFileCount > 0 ? Math.max(1, maxReviewers + 1) : Math.max(1, maxReviewers);
+  const sortedUsers = [...users.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([name]) => name)
+    .slice(0, cap);
+  const sortedTeams = [...teams.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([name]) => name)
+    .slice(0, cap);
   return { users: sortedUsers, teams: sortedTeams };
 }
 
@@ -674,6 +765,10 @@ function buildComment({ pr, result, nextSteps, reviewerRouting, requiredCoverage
     ? `### Required Reviewer Coverage (Path Policies)\n- Required users: ${requiredCoverage.required.users.length ? requiredCoverage.required.users.map((u) => `@${u}`).join(", ") : "None"}\n- Required teams: ${requiredCoverage.required.teams.length ? requiredCoverage.required.teams.map((t) => `@${t}`).join(", ") : "None"}\n- Missing users: ${requiredCoverage.missing.users.length ? requiredCoverage.missing.users.map((u) => `@${u}`).join(", ") : "None"}\n- Missing teams: ${requiredCoverage.missing.teams.length ? requiredCoverage.missing.teams.map((t) => `@${t}`).join(", ") : "None"}`
     : "";
 
+  const deltaSection = result.delta
+    ? `### Delta Since Previous Run\n- Added findings: ${result.delta.added.length}\n- Resolved findings: ${result.delta.resolved.length}`
+    : "";
+
   return `${MARKER}
 ## ReviewOS Copilot Report
 
@@ -692,6 +787,8 @@ function buildComment({ pr, result, nextSteps, reviewerRouting, requiredCoverage
 ${reviewersSection}
 
 ${requiredSection}
+
+${deltaSection}
 
 ### Findings
 
@@ -762,6 +859,28 @@ async function upsertComment(owner, repo, issueNumber, token, body) {
   return { mode: "created", id: created.id };
 }
 
+async function syncManagedLabels(owner, repo, issueNumber, token, desiredLabels, managedLabels) {
+  const current = await ghRequest(`https://api.github.com/repos/${owner}/${repo}/issues/${issueNumber}/labels`, token);
+  const currentNames = new Set((current || []).map((l) => l.name));
+  const desired = new Set(desiredLabels);
+
+  for (const label of managedLabels) {
+    if (currentNames.has(label) && !desired.has(label)) {
+      await ghRequest(`https://api.github.com/repos/${owner}/${repo}/issues/${issueNumber}/labels/${encodeURIComponent(label)}`, token, {
+        method: "DELETE",
+      });
+    }
+  }
+
+  const toAdd = [...desired].filter((l) => !currentNames.has(l));
+  if (toAdd.length) {
+    await ghRequest(`https://api.github.com/repos/${owner}/${repo}/issues/${issueNumber}/labels`, token, {
+      method: "POST",
+      body: JSON.stringify({ labels: toAdd }),
+    });
+  }
+}
+
 async function requestReviewers(owner, repo, pullNumber, token, reviewerRouting) {
   if (reviewerRouting.users.length === 0 && reviewerRouting.teams.length === 0) return null;
 
@@ -772,6 +891,47 @@ async function requestReviewers(owner, repo, pullNumber, token, reviewerRouting)
       team_reviewers: reviewerRouting.teams,
     }),
   });
+}
+
+function writeSarifReport(repoSlug, pr, result) {
+  const findings = (result.findings || []).filter((f) => ["Security", "PathPolicy", "ReviewerPolicy"].includes(f.lens));
+  const sarif = {
+    $schema: "https://json.schemastore.org/sarif-2.1.0.json",
+    version: "2.1.0",
+    runs: [
+      {
+        tool: {
+          driver: {
+            name: "review-os",
+            version: "0.1.4",
+            informationUri: "https://github.com/anup4khandelwal/autopilot-multi-agent-loop",
+            rules: findings.map((f, idx) => ({
+              id: `reviewos-${idx + 1}`,
+              shortDescription: { text: `${f.lens} ${f.severity}` },
+              fullDescription: { text: f.message },
+              defaultConfiguration: { level: f.severity === "critical" ? "error" : f.severity === "warning" ? "warning" : "note" },
+            })),
+          },
+        },
+        results: findings.map((f, idx) => ({
+          ruleId: `reviewos-${idx + 1}`,
+          level: f.severity === "critical" ? "error" : f.severity === "warning" ? "warning" : "note",
+          message: { text: f.message },
+          locations: [
+            {
+              physicalLocation: {
+                artifactLocation: { uri: `${repoSlug}/pull/${pr.number}` },
+              },
+            },
+          ],
+        })),
+      },
+    ],
+  };
+  const out = ".reviewos/security-findings.sarif";
+  ensureDir(path.dirname(out));
+  fs.writeFileSync(out, JSON.stringify(sarif, null, 2));
+  return out;
 }
 
 async function sendCriticalAlerts({ config, repoSlug, pr, result }) {
@@ -885,6 +1045,9 @@ function writeStepSummary({ pr, result, nextSteps, reviewerRouting, requiredCove
     `- Info findings: ${result.grouped.info.length}`,
     `- Suggested reviewers (users): ${reviewerRouting.users.join(", ") || "none"}`,
     `- Suggested reviewers (teams): ${reviewerRouting.teams.join(", ") || "none"}`,
+    `- Reviewer routing mode: ${reviewerRouting.riskBased ? "risk-based" : "standard"}`,
+    `- Delta added findings: ${result.delta?.added?.length || 0}`,
+    `- Delta resolved findings: ${result.delta?.resolved?.length || 0}`,
     `- Missing required users: ${requiredCoverage.missing.users.join(", ") || "none"}`,
     `- Missing required teams: ${requiredCoverage.missing.teams.join(", ") || "none"}`,
     `- Matched path rules: ${matchedRules.map((r) => `${r.name}(${r.count})`).join(", ") || "none"}`,
@@ -946,7 +1109,11 @@ async function main() {
   const reviewerRouting = {
     enabled: Boolean(config.reviewer_routing?.enabled),
     autoRequest: Boolean(config.reviewer_routing?.auto_request),
-    ...resolveReviewers(files, prAuthor, codeownerRules, Number(config.reviewer_routing?.max_reviewers) || 3),
+    riskBased: Boolean(config.reviewer_routing?.risk_based),
+    ...resolveReviewers(files, prAuthor, codeownerRules, {
+      maxReviewers: Number(config.reviewer_routing?.max_reviewers) || 3,
+      riskBased: Boolean(config.reviewer_routing?.risk_based),
+    }),
   };
 
   const required = result.requiredReviewers || { users: [], teams: [] };
@@ -1016,6 +1183,7 @@ async function main() {
     pathPolicy: {
       matchedRules: result.matchedPathRules || [],
     },
+    delta: result.delta || { added: [], resolved: [] },
   };
 
   ensureDir(path.dirname(REPORT_PATH));
@@ -1068,11 +1236,28 @@ async function main() {
 
     console.log(`History updated: ${historyFilePath}`);
 
+    if (config.labels?.enabled) {
+      const managedLabels = [
+        String(config.labels.critical_label || "reviewos:critical"),
+        String(config.labels.security_label || "reviewos:security"),
+        String(config.labels.ready_label || "reviewos:ready"),
+      ];
+      const desiredLabels = [];
+      if (result.grouped.critical.length > 0) desiredLabels.push(managedLabels[0]);
+      if (result.scores.security < Number(config.thresholds.security_warning || 75)) desiredLabels.push(managedLabels[1]);
+      if (result.grouped.critical.length === 0 && result.mergeReadiness >= 90) desiredLabels.push(managedLabels[2]);
+      await syncManagedLabels(owner, repo, pr.number, token, desiredLabels, managedLabels);
+      console.log(`Labels synced: ${desiredLabels.join(",") || "none"}`);
+    }
+
     const alertResult = await sendCriticalAlerts({ config, repoSlug, pr, result });
     if (alertResult.sent.length) {
       console.log(`Alerts sent: ${alertResult.sent.join(",")}`);
     }
   }
+
+  const sarifPath = writeSarifReport(repoSlug, pr, result);
+  console.log(`SARIF written: ${sarifPath}`);
 
   writeStepSummary({
     pr,
