@@ -59,6 +59,14 @@ jobs:
           path: .reviewos/traces
           if-no-files-found: ignore
 
+      - name: Upload PR Scorecards
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reviewos-scorecards-${{ github.run_id }}
+          path: .reviewos/scorecards
+          if-no-files-found: ignore
+
       - name: Upload SARIF Artifact
         if: always()
         uses: actions/upload-artifact@v4

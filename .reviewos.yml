@@ -24,6 +24,8 @@ reviewer_routing:
   load_balance_state_file: .reviewos/reviewer-load.json
   load_balance_decay_days: 14
   load_balance_weight: 0.6
+  weekly_capacity_per_user: 10
+  weekly_capacity_per_team: 20
 
 labels:
   enabled: true
@@ -45,6 +47,33 @@ incident_safe:
   security_penalty_multiplier: 1.4
   require_tests_on_sensitive: true
   min_approvals: 1
+
+adaptive_thresholds:
+  enabled: true
+  window_runs: 50
+  blend: 0.5
+  min_threshold: 60
+  max_threshold: 90
+
+escalation:
+  enabled: true
+  levels:
+    p1:
+      min_critical: 2
+      max_merge_readiness: 70
+      owners: security,platform
+      notify: slack,discord
+      message: Immediate escalation required.
+    p2:
+      min_critical: 1
+      max_merge_readiness: 82
+      owners: platform
+      notify: slack
+      message: High-priority escalation recommended.
+
+regression_signatures:
+  enabled: true
+  repeat_threshold: 2
 
 alerts:
   enabled: false

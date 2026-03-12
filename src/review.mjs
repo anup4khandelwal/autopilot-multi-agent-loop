@@ -7,6 +7,7 @@ const SLA_MARKER = "<!-- review-os:sla-reminder -->";
 const HISTORY_DIR = ".reviewos/history";
 const REPORT_PATH = ".reviewos/last-report.json";
 const TRACE_DIR = ".reviewos/traces";
+const SCORECARD_DIR = ".reviewos/scorecards";
 
 function clamp(v, min = 0, max = 100) {
   return Math.max(min, Math.min(max, v));
@@ -126,6 +127,8 @@ function loadConfig(configPath = ".reviewos.yml") {
       load_balance_state_file: ".reviewos/reviewer-load.json",
       load_balance_decay_days: 14,
       load_balance_weight: 0.6,
+      weekly_capacity_per_user: 10,
+      weekly_capacity_per_team: 20,
     },
     labels: {
       enabled: false,
@@ -147,6 +150,36 @@ function loadConfig(configPath = ".reviewos.yml") {
       security_penalty_multiplier: 1.4,
       require_tests_on_sensitive: true,
       min_approvals: 1,
+    },
+    adaptive_thresholds: {
+      enabled: true,
+      window_runs: 50,
+      blend: 0.5,
+      min_threshold: 60,
+      max_threshold: 90,
+    },
+    escalation: {
+      enabled: true,
+      levels: {
+        p1: {
+          min_critical: 2,
+          max_merge_readiness: 70,
+          owners: "security,platform",
+          notify: "slack,discord",
+          message: "Immediate escalation required.",
+        },
+        p2: {
+          min_critical: 1,
+          max_merge_readiness: 82,
+          owners: "platform",
+          notify: "slack",
+          message: "High-priority escalation recommended.",
+        },
+      },
+    },
+    regression_signatures: {
+      enabled: true,
+      repeat_threshold: 2,
     },
     finding_ownership: {
       default_owner: "unassigned",
@@ -191,6 +224,9 @@ function loadConfig(configPath = ".reviewos.yml") {
     fix_suggestions: { ...defaults.fix_suggestions },
     reviewer_sla: { ...defaults.reviewer_sla },
     incident_safe: { ...defaults.incident_safe },
+    adaptive_thresholds: { ...defaults.adaptive_thresholds },
+    escalation: { ...defaults.escalation, levels: { ...(defaults.escalation?.levels || {}) } },
+    regression_signatures: { ...defaults.regression_signatures },
     alerts: { ...defaults.alerts },
     prompt_trace: { ...defaults.prompt_trace },
     release_gate: { ...defaults.release_gate },
@@ -433,6 +469,10 @@ function historyFile(repoSlug, prNumber) {
   return path.join(HISTORY_DIR, `${safeRepo}__pr-${prNumber}.json`);
 }
 
+function repoPrefix(repoSlug) {
+  return `${repoSlug.replace(/\//g, "__")}__pr-`;
+}
+
 function loadHistory(repoSlug, prNumber) {
   const file = historyFile(repoSlug, prNumber);
   if (!fs.existsSync(file)) return [];
@@ -441,6 +481,48 @@ function loadHistory(repoSlug, prNumber) {
   } catch {
     return [];
   }
+}
+
+function loadRepoHistoryRuns(repoSlug) {
+  if (!fs.existsSync(HISTORY_DIR)) return [];
+  const prefix = repoPrefix(repoSlug);
+  const files = fs.readdirSync(HISTORY_DIR).filter((f) => f.startsWith(prefix) && f.endsWith(".json"));
+  const runs = [];
+  for (const file of files) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(path.join(HISTORY_DIR, file), "utf8"));
+      if (Array.isArray(parsed)) {
+        for (const row of parsed) {
+          if (row && typeof row === "object") runs.push({ ...row, _source: file });
+        }
+      }
+    } catch {
+      // ignore malformed files
+    }
+  }
+  return runs.sort((a, b) => String(a.timestamp || "").localeCompare(String(b.timestamp || "")));
+}
+
+function avg(nums) {
+  if (!nums.length) return 0;
+  return nums.reduce((s, n) => s + n, 0) / nums.length;
+}
+
+function stddev(nums) {
+  if (nums.length < 2) return 0;
+  const mean = avg(nums);
+  const variance = nums.reduce((s, n) => s + (n - mean) * (n - mean), 0) / (nums.length - 1);
+  return Math.sqrt(variance);
+}
+
+function percentile(nums, value) {
+  if (!nums.length) return 100;
+  const sorted = [...nums].sort((a, b) => a - b);
+  let count = 0;
+  for (const n of sorted) {
+    if (n <= value) count += 1;
+  }
+  return Math.round((count / sorted.length) * 100);
 }
 
 function saveHistory(repoSlug, prNumber, entry) {
@@ -766,6 +848,54 @@ function pickLoadBalancedCandidates(candidates, scoreMap, loadMap, cap, weight, 
   return ranked.slice(0, cap).map((r) => r.id);
 }
 
+function weeklyCount(rec, nowTs) {
+  if (!rec || !rec.weekly_updated_at) return 0;
+  const ageMs = nowTs - new Date(rec.weekly_updated_at).getTime();
+  if (!Number.isFinite(ageMs) || ageMs > 7 * 24 * 60 * 60 * 1000) return 0;
+  return Number(rec.weekly_count || 0);
+}
+
+function applyCapacityCaps(candidates, loadMap, weeklyCap, nowTs) {
+  if (!Number.isFinite(weeklyCap) || weeklyCap <= 0) return { kept: candidates, cappedOut: [] };
+  const kept = [];
+  const cappedOut = [];
+  for (const id of candidates) {
+    const count = weeklyCount(loadMap[id], nowTs);
+    if (count >= weeklyCap) cappedOut.push(id);
+    else kept.push(id);
+  }
+  if (!kept.length && cappedOut.length) return { kept: candidates, cappedOut };
+  return { kept, cappedOut };
+}
+
+function pickLoadBalancedWithCaps({
+  candidates,
+  scoreMap,
+  loadMap,
+  cap,
+  weight,
+  nowTs,
+  decayDays,
+  weeklyCap,
+}) {
+  const ranked = candidates
+    .map((id) => {
+      const base = Number(scoreMap[id] || 0);
+      const rec = loadMap[id] || { count: 0, updated_at: "" };
+      const daysSince = rec.updated_at ? (nowTs - new Date(rec.updated_at).getTime()) / (1000 * 60 * 60 * 24) : 999;
+      const decayed = decayLoadCounter(Number(rec.count || 0), daysSince, decayDays);
+      const finalScore = base - weight * decayed;
+      return { id, base, decayed, finalScore };
+    })
+    .sort((a, b) => b.finalScore - a.finalScore || a.id.localeCompare(b.id));
+  const rankedIds = ranked.map((r) => r.id);
+  const caps = applyCapacityCaps(rankedIds, loadMap, weeklyCap, nowTs);
+  return {
+    picked: caps.kept.slice(0, cap),
+    cappedOut: caps.cappedOut,
+  };
+}
+
 function applyReviewerLoadBalancing(routing, config) {
   if (!config.reviewer_routing?.load_balance_enabled) return routing;
   const statePath = String(config.reviewer_routing?.load_balance_state_file || ".reviewos/reviewer-load.json");
@@ -773,20 +903,44 @@ function applyReviewerLoadBalancing(routing, config) {
   const cap = Math.max(1, Number(config.reviewer_routing?.max_reviewers || 3));
   const weight = Math.max(0, Number(config.reviewer_routing?.load_balance_weight || 0.6));
   const decayDays = Math.max(1, Number(config.reviewer_routing?.load_balance_decay_days || 14));
+  const userWeeklyCap = Number(config.reviewer_routing?.weekly_capacity_per_user || 10);
+  const teamWeeklyCap = Number(config.reviewer_routing?.weekly_capacity_per_team || 20);
   const nowTs = Date.now();
 
-  const users = pickLoadBalancedCandidates(routing.users, routing.userScores || {}, state.users || {}, cap, weight, nowTs, decayDays);
-  const teams = pickLoadBalancedCandidates(routing.teams, routing.teamScores || {}, state.teams || {}, cap, weight, nowTs, decayDays);
+  const userPick = pickLoadBalancedWithCaps({
+    candidates: routing.users,
+    scoreMap: routing.userScores || {},
+    loadMap: state.users || {},
+    cap,
+    weight,
+    nowTs,
+    decayDays,
+    weeklyCap: userWeeklyCap,
+  });
+  const teamPick = pickLoadBalancedWithCaps({
+    candidates: routing.teams,
+    scoreMap: routing.teamScores || {},
+    loadMap: state.teams || {},
+    cap,
+    weight,
+    nowTs,
+    decayDays,
+    weeklyCap: teamWeeklyCap,
+  });
 
   return {
     ...routing,
-    users,
-    teams,
+    users: userPick.picked,
+    teams: teamPick.picked,
     loadBalance: {
       enabled: true,
       statePath,
       decayDays,
       weight,
+      userWeeklyCap,
+      teamWeeklyCap,
+      cappedUsers: userPick.cappedOut,
+      cappedTeams: teamPick.cappedOut,
     },
   };
 }
@@ -797,12 +951,24 @@ function updateReviewerLoadState(config, users, teams) {
   const state = loadReviewerLoadState(statePath);
   const now = new Date().toISOString();
   for (const u of users || []) {
-    const prev = state.users[u] || { count: 0 };
-    state.users[u] = { count: Number(prev.count || 0) + 1, updated_at: now };
+    const prev = state.users[u] || { count: 0, weekly_count: 0, weekly_updated_at: now };
+    const prevWeekly = weeklyCount(prev, Date.now());
+    state.users[u] = {
+      count: Number(prev.count || 0) + 1,
+      updated_at: now,
+      weekly_count: prevWeekly + 1,
+      weekly_updated_at: now,
+    };
   }
   for (const t of teams || []) {
-    const prev = state.teams[t] || { count: 0 };
-    state.teams[t] = { count: Number(prev.count || 0) + 1, updated_at: now };
+    const prev = state.teams[t] || { count: 0, weekly_count: 0, weekly_updated_at: now };
+    const prevWeekly = weeklyCount(prev, Date.now());
+    state.teams[t] = {
+      count: Number(prev.count || 0) + 1,
+      updated_at: now,
+      weekly_count: prevWeekly + 1,
+      weekly_updated_at: now,
+    };
   }
   saveReviewerLoadState(statePath, state);
 }
@@ -1037,10 +1203,130 @@ function buildFixSuggestions(result, files, config) {
   return suggestions.slice(0, maxItems);
 }
 
-function buildNextSteps(result, config) {
+function computeAdaptiveThresholds(config, repoRuns) {
+  const base = config.thresholds || {};
+  if (!config.adaptive_thresholds?.enabled) return { ...base };
+  const windowRuns = Math.max(5, Number(config.adaptive_thresholds.window_runs || 50));
+  const blend = Math.max(0, Math.min(1, Number(config.adaptive_thresholds.blend || 0.5)));
+  const minT = Math.max(1, Number(config.adaptive_thresholds.min_threshold || 60));
+  const maxT = Math.min(99, Number(config.adaptive_thresholds.max_threshold || 90));
+  const recent = (repoRuns || []).slice(-windowRuns);
+  if (recent.length < 5) return { ...base };
+
+  const lensToMetric = {
+    engineering_warning: "engineering",
+    product_warning: "product",
+    design_warning: "design",
+    security_warning: "security",
+  };
+  const out = { ...base };
+  for (const [thresholdKey, lensKey] of Object.entries(lensToMetric)) {
+    const series = recent.map((r) => Number(r.scores?.[lensKey] || 0)).filter((x) => Number.isFinite(x));
+    if (!series.length) continue;
+    const adaptive = avg(series) - stddev(series);
+    const merged = Math.round((1 - blend) * Number(base[thresholdKey] || 75) + blend * adaptive);
+    out[thresholdKey] = clamp(merged, minT, maxT);
+  }
+  return out;
+}
+
+function buildRegressionSignature(findings) {
+  const core = (findings || [])
+    .filter((f) => f.severity === "critical" || f.severity === "warning")
+    .map((f) => `${f.lens}|${f.message}`)
+    .sort()
+    .join("||");
+  return crypto.createHash("sha1").update(core || "none").digest("hex").slice(0, 16);
+}
+
+function detectRegressionSignature({ result, repoRuns, config }) {
+  if (!config.regression_signatures?.enabled) return { signature: "", repeats: 0, finding: null };
+  const signature = buildRegressionSignature(result.findings || []);
+  const repeats = (repoRuns || []).filter((r) => String(r.regressionSignature || "") === signature).length;
+  const threshold = Math.max(1, Number(config.regression_signatures.repeat_threshold || 2));
+  if (repeats < threshold) return { signature, repeats, finding: null };
+  return {
+    signature,
+    repeats,
+    finding: {
+      severity: "warning",
+      lens: "Regression",
+      message: `Regression signature '${signature}' has appeared ${repeats + 1} times (including this run).`,
+    },
+  };
+}
+
+function computeEscalationPlan({ result, config }) {
+  if (!config.escalation?.enabled) return [];
+  const levels = config.escalation?.levels || {};
+  const criticalCount = result.grouped?.critical?.length || 0;
+  const plans = [];
+  for (const [levelName, rule] of Object.entries(levels)) {
+    const minCritical = Number(rule.min_critical || 1);
+    const maxReadiness = Number(rule.max_merge_readiness || 100);
+    if (criticalCount < minCritical) continue;
+    if (Number(result.mergeReadiness || 0) > maxReadiness) continue;
+    plans.push({
+      level: levelName,
+      owners: splitList(rule.owners),
+      notify: splitList(rule.notify),
+      message: String(rule.message || ""),
+    });
+  }
+  return plans;
+}
+
+function writeQualityScorecard({ repoSlug, pr, result, repoRuns, effectiveThresholds }) {
+  const mergeReadinessSeries = (repoRuns || []).map((r) => Number(r.mergeReadiness || 0));
+  const mergePercentile = percentile([...mergeReadinessSeries, Number(result.mergeReadiness || 0)], Number(result.mergeReadiness || 0));
+  const lensPercentiles = {
+    engineering: percentile(
+      [...(repoRuns || []).map((r) => Number(r.scores?.engineering || 0)), Number(result.scores?.engineering || 0)],
+      Number(result.scores?.engineering || 0)
+    ),
+    product: percentile(
+      [...(repoRuns || []).map((r) => Number(r.scores?.product || 0)), Number(result.scores?.product || 0)],
+      Number(result.scores?.product || 0)
+    ),
+    design: percentile(
+      [...(repoRuns || []).map((r) => Number(r.scores?.design || 0)), Number(result.scores?.design || 0)],
+      Number(result.scores?.design || 0)
+    ),
+    security: percentile(
+      [...(repoRuns || []).map((r) => Number(r.scores?.security || 0)), Number(result.scores?.security || 0)],
+      Number(result.scores?.security || 0)
+    ),
+  };
+
+  ensureDir(SCORECARD_DIR);
+  const safeRepo = repoSlug.replace(/\//g, "__");
+  const jsonPath = path.join(SCORECARD_DIR, `${safeRepo}__pr-${pr.number}.json`);
+  const mdPath = path.join(SCORECARD_DIR, `${safeRepo}__pr-${pr.number}.md`);
+  const payload = {
+    timestamp: new Date().toISOString(),
+    repository: repoSlug,
+    pr: { number: pr.number, title: pr.title, url: pr.html_url || "" },
+    mergeReadiness: result.mergeReadiness,
+    mergeReadinessPercentile: mergePercentile,
+    scores: result.scores,
+    lensPercentiles,
+    findings: {
+      critical: result.grouped?.critical?.length || 0,
+      warning: result.grouped?.warning?.length || 0,
+      info: result.grouped?.info?.length || 0,
+    },
+    effectiveThresholds,
+  };
+  fs.writeFileSync(jsonPath, JSON.stringify(payload, null, 2));
+  const md = `# PR Quality Scorecard\n\n- Repository: ${repoSlug}\n- PR: #${pr.number} ${pr.title}\n- Merge Readiness: **${result.mergeReadiness}/100** (P${mergePercentile})\n\n## Lens Percentiles\n\n| Lens | Score | Percentile |\n|---|---:|---:|\n| Engineering | ${result.scores.engineering} | ${lensPercentiles.engineering} |\n| Product | ${result.scores.product} | ${lensPercentiles.product} |\n| Design | ${result.scores.design} | ${lensPercentiles.design} |\n| Security | ${result.scores.security} | ${lensPercentiles.security} |\n\n## Findings\n\n- Critical: ${payload.findings.critical}\n- Warning: ${payload.findings.warning}\n- Info: ${payload.findings.info}\n`;
+  fs.writeFileSync(mdPath, md);
+  return { jsonPath, mdPath, mergePercentile, lensPercentiles };
+}
+
+function buildNextSteps(result, thresholds) {
   const nextSteps = [];
   const { grouped, scores } = result;
-  const t = config.thresholds;
+  const t = thresholds;
 
   if (grouped.critical.length) nextSteps.push("Resolve all critical findings before merge.");
   if (scores.engineering < t.engineering_warning) nextSteps.push("Reduce PR scope or split changes for faster, higher-quality review.");
@@ -1052,7 +1338,7 @@ function buildNextSteps(result, config) {
   return nextSteps;
 }
 
-function buildComment({ pr, result, nextSteps, reviewerRouting, requiredCoverage, fixSuggestions = [], checklist = [] }) {
+function buildComment({ pr, result, nextSteps, reviewerRouting, requiredCoverage, fixSuggestions = [], checklist = [], escalationPlan = [] }) {
   const fmt = (items, icon) => (items.length ? items.map((f) => `- ${icon} **${f.lens}**: ${f.message}`).join("\n") : "- None");
 
   const reviewersSection = reviewerRouting.enabled
@@ -1071,6 +1357,14 @@ function buildComment({ pr, result, nextSteps, reviewerRouting, requiredCoverage
     : "";
   const checklistSection = checklist.length
     ? `### Pre-Merge Checklist\n${checklist.map((c) => `- [${c.done ? "x" : " "}] ${c.text}`).join("\n")}`
+    : "";
+  const escalationSection = escalationPlan.length
+    ? `### Escalation Plan\n${escalationPlan
+        .map(
+          (e) =>
+            `- **${e.level}** owners: ${e.owners.length ? e.owners.join(", ") : "none"}; notify: ${e.notify.length ? e.notify.join(", ") : "none"}${e.message ? `; note: ${e.message}` : ""}`
+        )
+        .join("\n")}`
     : "";
 
   return `${MARKER}
@@ -1097,6 +1391,8 @@ ${deltaSection}
 ${fixSection}
 
 ${checklistSection}
+
+${escalationSection}
 
 ### Findings
 
@@ -1238,7 +1534,7 @@ function writeSarifReport(repoSlug, pr, result) {
         tool: {
           driver: {
             name: "review-os",
-            version: "0.1.5",
+            version: "0.1.7",
             informationUri: "https://github.com/anup4khandelwal/autopilot-multi-agent-loop",
             rules: findings.map((f, idx) => ({
               id: `reviewos-${idx + 1}`,
@@ -1269,7 +1565,7 @@ function writeSarifReport(repoSlug, pr, result) {
   return out;
 }
 
-async function sendCriticalAlerts({ config, repoSlug, pr, result }) {
+async function sendCriticalAlerts({ config, repoSlug, pr, result, escalationPlan = [] }) {
   if (!config.alerts?.enabled) return { sent: [] };
   if (!result.grouped?.critical?.length) return { sent: [] };
 
@@ -1308,6 +1604,12 @@ async function sendCriticalAlerts({ config, repoSlug, pr, result }) {
       });
       if (hit) {
         for (const c of routeChannels) out.add(`${c}:${routeName}`);
+      }
+    }
+
+    for (const plan of escalationPlan || []) {
+      for (const ch of plan.notify || []) {
+        out.add(`${String(ch).toLowerCase()}:escalation-${plan.level}`);
       }
     }
 
@@ -1357,7 +1659,18 @@ async function sendCriticalAlerts({ config, repoSlug, pr, result }) {
   return { sent };
 }
 
-function writeStepSummary({ pr, result, nextSteps, reviewerRouting, requiredCoverage, matchedRules, checklist = [] }) {
+function writeStepSummary({
+  pr,
+  result,
+  nextSteps,
+  reviewerRouting,
+  requiredCoverage,
+  matchedRules,
+  checklist = [],
+  effectiveThresholds = {},
+  escalationPlan = [],
+  regression = {},
+}) {
   const summaryPath = process.env.GITHUB_STEP_SUMMARY;
   if (!summaryPath) return;
 
@@ -1381,11 +1694,16 @@ function writeStepSummary({ pr, result, nextSteps, reviewerRouting, requiredCove
     `- Suggested reviewers (users): ${reviewerRouting.users.join(", ") || "none"}`,
     `- Suggested reviewers (teams): ${reviewerRouting.teams.join(", ") || "none"}`,
     `- Reviewer routing mode: ${reviewerRouting.riskBased ? "risk-based" : "standard"}`,
+    `- Reviewer load balancing: ${reviewerRouting.loadBalance?.enabled ? "enabled" : "disabled"}`,
     `- Delta added findings: ${result.delta?.added?.length || 0}`,
     `- Delta resolved findings: ${result.delta?.resolved?.length || 0}`,
+    `- Regression signature: ${regression.signature || "none"} (repeats: ${(regression.repeats || 0) + 1})`,
     `- Missing required users: ${requiredCoverage.missing.users.join(", ") || "none"}`,
     `- Missing required teams: ${requiredCoverage.missing.teams.join(", ") || "none"}`,
     `- Matched path rules: ${matchedRules.map((r) => `${r.name}(${r.count})`).join(", ") || "none"}`,
+    "",
+    `- Effective thresholds: eng=${effectiveThresholds.engineering_warning ?? "n/a"}, product=${effectiveThresholds.product_warning ?? "n/a"}, design=${effectiveThresholds.design_warning ?? "n/a"}, security=${effectiveThresholds.security_warning ?? "n/a"}`,
+    `- Escalation levels: ${escalationPlan.length ? escalationPlan.map((e) => e.level).join(", ") : "none"}`,
     "",
     "### Next Steps",
     ...nextSteps.map((s) => `- ${s}`),
@@ -1459,8 +1777,10 @@ async function main() {
     reviews = await getPullReviews(owner, repo, pull.number, token);
   }
 
+  const repoRuns = loadRepoHistoryRuns(repoSlug);
+  const effectiveThresholds = computeAdaptiveThresholds(config, repoRuns);
   const result = runAgentLoop({ pr, files, config, repoSlug });
-  const nextSteps = buildNextSteps(result, config);
+  const nextSteps = buildNextSteps(result, effectiveThresholds);
   const fixSuggestions = buildFixSuggestions(result, files, config);
 
   const codeownerRules = loadCodeowners();
@@ -1549,7 +1869,26 @@ async function main() {
   }
 
   result.findings = applyFindingOwnership(result.findings, files, config);
+  if (reviewerRoutingFinal?.loadBalance?.cappedUsers?.length || reviewerRoutingFinal?.loadBalance?.cappedTeams?.length) {
+    result.findings = dedupeFindings([
+      ...result.findings,
+      {
+        severity: "info",
+        lens: "ReviewerRouting",
+        message: `Capacity caps applied. Skipped users: ${reviewerRoutingFinal.loadBalance.cappedUsers.join(",") || "none"}; teams: ${reviewerRoutingFinal.loadBalance.cappedTeams.join(",") || "none"}.`,
+      },
+    ]);
+  }
+  const regression = detectRegressionSignature({ result, repoRuns, config });
+  if (regression.finding) {
+    result.findings = dedupeFindings([...result.findings, regression.finding]);
+    nextSteps.unshift("Investigate recurring regression signature before merge.");
+  }
   result.grouped = summarizeFindings(result.findings);
+  const escalationPlan = computeEscalationPlan({ result, config });
+  if (escalationPlan.length) {
+    nextSteps.unshift(`Execute escalation plan: ${escalationPlan.map((p) => p.level).join(", ")}`);
+  }
 
   const requiredCoverage = {
     required,
@@ -1571,6 +1910,7 @@ async function main() {
     requiredCoverage,
     fixSuggestions,
     checklist,
+    escalationPlan,
   });
   const autoRequestAttempted = reviewerRoutingFinal.enabled && reviewerRoutingFinal.autoRequest;
   const approvedByReviewer = (reviews || []).some((r) => String(r.state || "").toUpperCase() === "APPROVED");
@@ -1595,6 +1935,10 @@ async function main() {
       matchedRules: result.matchedPathRules || [],
     },
     delta: result.delta || { added: [], resolved: [] },
+    effectiveThresholds,
+    regressionSignature: regression.signature,
+    regressionRepeats: regression.repeats + 1,
+    escalationPlan,
     promptTracePath: "",
     checklist,
     approvalCount,
@@ -1605,6 +1949,14 @@ async function main() {
       exceeded: Boolean(slaExceeded),
     },
   };
+  const scorecard = writeQualityScorecard({
+    repoSlug,
+    pr,
+    result,
+    repoRuns,
+    effectiveThresholds,
+  });
+  historyEntry.scorecard = scorecard;
   if (result.traces) {
     const tracePath = writePromptTrace({
       config,
@@ -1628,6 +1980,7 @@ async function main() {
         scores: result.scores,
         grouped: result.grouped,
         nextSteps,
+        effectiveThresholds,
         reviewerRouting: {
           enabled: reviewerRouting.enabled,
           users: reviewerRoutingFinal.users,
@@ -1640,6 +1993,10 @@ async function main() {
         fixSuggestions,
         promptTracePath: historyEntry.promptTracePath,
         checklist,
+        escalationPlan,
+        regressionSignature: regression.signature,
+        regressionRepeats: regression.repeats + 1,
+        scorecard,
       },
       null,
       2
@@ -1698,13 +2055,13 @@ async function main() {
       ];
       const desiredLabels = [];
       if (result.grouped.critical.length > 0) desiredLabels.push(managedLabels[0]);
-      if (result.scores.security < Number(config.thresholds.security_warning || 75)) desiredLabels.push(managedLabels[1]);
+      if (result.scores.security < Number(effectiveThresholds.security_warning || 75)) desiredLabels.push(managedLabels[1]);
       if (result.grouped.critical.length === 0 && result.mergeReadiness >= 90) desiredLabels.push(managedLabels[2]);
       await syncManagedLabels(owner, repo, pr.number, token, desiredLabels, managedLabels);
       console.log(`Labels synced: ${desiredLabels.join(",") || "none"}`);
     }
 
-    const alertResult = await sendCriticalAlerts({ config, repoSlug, pr, result });
+    const alertResult = await sendCriticalAlerts({ config, repoSlug, pr, result, escalationPlan });
     if (alertResult.sent.length) {
       console.log(`Alerts sent: ${alertResult.sent.join(",")}`);
     }
@@ -1724,6 +2081,9 @@ async function main() {
     requiredCoverage,
     matchedRules: result.matchedPathRules || [],
     checklist,
+    effectiveThresholds,
+    escalationPlan,
+    regression,
   });
 
   if (failOnCritical && result.grouped.critical.length > 0) {

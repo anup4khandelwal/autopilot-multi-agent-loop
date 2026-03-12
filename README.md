@@ -2,13 +2,13 @@
 
 ReviewOps Copilot for pull requests. `review-os` shifts teams from implementation-heavy flow to structured review across Engineering, Product, Design, and Security.
 
-## Latest Update (v0.1.6)
+## Latest Update (v0.1.7)
 
-- Added incident-safe mode with stronger security penalties and mandatory approval checks
-- Added dynamic pre-merge checklist generation in PR comments and step summaries
-- Added finding ownership mapping with exportable ownership reports
-- Added reviewer load balancing to distribute reviewer requests over time
-- Added 95% confidence-band analytics for readiness/lens metrics (`docs/review-confidence.csv`)
+- Added reviewer weekly capacity caps on auto-request routing
+- Added adaptive thresholds from rolling repository baseline
+- Added escalation matrix with level-based owner/channel routing
+- Added regression signature detection for repeated warning/critical patterns
+- Added per-PR quality scorecard artifacts with percentile ranking
 
 ## What it does
 
@@ -56,11 +56,15 @@ Use `.reviewos.yml`:
 - `reviewer_routing.max_reviewers` cap requests
 - `reviewer_routing.risk_based` boost risky-domain owner routing
 - `reviewer_routing.load_balance_*` configure reviewer load balancing behavior
+- `reviewer_routing.weekly_capacity_per_user|weekly_capacity_per_team` cap reviewer assignment load
 - `labels.enabled` enable PR label automation
 - `labels.critical_label|security_label|ready_label` managed labels
 - `fix_suggestions.enabled|max_items` include remediation hints in PR report
 - `reviewer_sla.enabled|threshold_hours|cooldown_hours` reminder policy
 - `incident_safe.enabled|security_penalty_multiplier|min_approvals` incident enforcement
+- `adaptive_thresholds.*` auto-adjust warning thresholds from recent history
+- `escalation.levels.*` level-based escalation policies
+- `regression_signatures.*` detect repeated quality regressions
 - `finding_ownership.default_owner|rules` team mapping for findings
 - `path_overrides` apply path-based penalties and test requirements
 - `alerts.enabled` enable Slack/Discord critical alerts
@@ -118,6 +122,7 @@ Also writes: `docs/repo-baseline.csv`
 Also writes: `docs/finding-ownership.md`
 Also writes: `docs/finding-ownership.csv`
 Also writes: `docs/review-confidence.csv`
+Also writes: `.reviewos/scorecards/*.json|*.md`
 
 ## Publish dashboard (Pages)
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.1.7
+
+- Added reviewer capacity caps for balanced reviewer assignment
+- Added adaptive warning thresholds derived from rolling baseline scores
+- Added escalation matrix support with level-based routing metadata
+- Added regression signature detection for repeated warning/critical patterns
+- Added per-PR quality scorecard artifacts with percentile ranking
+
 ## v0.1.6
 
 - Added incident-safe mode with amplified security penalties and required approval checks

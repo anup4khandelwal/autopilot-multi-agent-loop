@@ -7,4 +7,6 @@ node_modules/
 .reviewos/alerts-state.json
 .reviewos/traces/*.json
 .reviewos/reviewer-load.json
+.reviewos/scorecards/*.json
+.reviewos/scorecards/*.md
 site/
