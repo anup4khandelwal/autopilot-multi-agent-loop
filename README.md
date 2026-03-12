@@ -2,13 +2,13 @@
 
 ReviewOps Copilot for pull requests. `review-os` shifts teams from implementation-heavy flow to structured review across Engineering, Product, Design, and Security.
 
-## Latest Update (v0.1.8)
+## Latest Update (v0.1.9)
 
-- Added cross-PR duplicate detection for shared regression signatures
-- Added auto-split recommendations for oversized PR scope
-- Added reviewer response latency analytics export
-- Added change-risk heatmap export (CSV + JSON)
-- Added policy drift detection from adaptive vs configured thresholds
+- Added live reviewer queue board with assignment, pending review, and capacity data
+- Added owner-specific SLA thresholds and escalation timers
+- Added context window budget advisor for large PR review prompts
+- Added risk-aware merge window policy for high-risk PRs
+- Added historical benchmark badges for readiness, latency, and critical rate
 
 ## What it does
 
@@ -61,6 +61,7 @@ Use `.reviewos.yml`:
 - `labels.critical_label|security_label|ready_label` managed labels
 - `fix_suggestions.enabled|max_items` include remediation hints in PR report
 - `reviewer_sla.enabled|threshold_hours|cooldown_hours` reminder policy
+- `reviewer_sla.owner_policies.*` owner-specific thresholds and escalation timers
 - `incident_safe.enabled|security_penalty_multiplier|min_approvals` incident enforcement
 - `adaptive_thresholds.*` auto-adjust warning thresholds from recent history
 - `escalation.levels.*` level-based escalation policies
@@ -68,6 +69,8 @@ Use `.reviewos.yml`:
 - `cross_pr_duplicates.*` detect same signatures across different PRs
 - `auto_split.*` suggest split boundaries for large PRs
 - `policy_drift.*` alert threshold divergence from configured baseline
+- `context_budget.*` estimate prompt budget and suggest compression strategy
+- `merge_window.*` enforce merge timing for high-risk PRs
 - `finding_ownership.default_owner|rules` team mapping for findings
 - `path_overrides` apply path-based penalties and test requirements
 - `alerts.enabled` enable Slack/Discord critical alerts
@@ -127,8 +130,11 @@ Also writes: `docs/finding-ownership.csv`
 Also writes: `docs/review-confidence.csv`
 Also writes: `.reviewos/scorecards/*.json|*.md`
 Also writes: `docs/reviewer-latency.csv`
+Also writes: `docs/reviewer-queue.md`
+Also writes: `docs/reviewer-queue.csv`
 Also writes: `docs/change-risk-heatmap.csv|json`
 Also writes: `docs/policy-drift.csv`
+Also writes: `docs/badges/*.json`
 
 ## Publish dashboard (Pages)
 
@@ -146,6 +152,8 @@ It will:
   - PR review loop
   - dashboard build
   - ownership report build
+  - reviewer queue board build
+  - benchmark badge build
   - SARIF generation/upload
   - prompt trace artifact upload
   - release gate enforcement

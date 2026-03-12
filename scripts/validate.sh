@@ -26,18 +26,25 @@ node --check src/review.mjs
 node --check src/release-gate.mjs
 node --check src/sla-reminder.mjs
 node --check scripts/build-ownership-report.mjs
+node --check scripts/build-reviewer-queue.mjs
+node --check scripts/build-badges.mjs
 
 echo "[5/6] Build dashboard outputs..."
 node scripts/build-dashboard.mjs >/tmp/reviewos-dashboard.log
 node scripts/build-ownership-report.mjs >/tmp/reviewos-ownership.log
+node scripts/build-reviewer-queue.mjs >/tmp/reviewos-queue.log
+node scripts/build-badges.mjs >/tmp/reviewos-badges.log
 test -f docs/review-dashboard.csv
 test -f docs/repo-baseline.csv
 test -f docs/review-confidence.csv
 test -f docs/reviewer-latency.csv
+test -f docs/reviewer-queue.md
+test -f docs/reviewer-queue.csv
 test -f docs/change-risk-heatmap.csv
 test -f docs/change-risk-heatmap.json
 test -f docs/policy-drift.csv
 test -f docs/finding-ownership.csv
+test -f docs/badges/readiness.json
 
 echo "[6/6] Render dashboard site..."
 node scripts/render-dashboard-site.mjs >/tmp/reviewos-site.log

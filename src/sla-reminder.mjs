@@ -1,6 +1,7 @@
 import fs from "node:fs";
 
 const MARKER = "<!-- review-os:sla-reminder -->";
+const REVIEW_MARKER = "<!-- review-os:pr-review -->";
 
 function parseThresholdHours() {
   const v = Number(process.env.REVIEW_SLA_HOURS || 24);
@@ -10,6 +11,21 @@ function parseThresholdHours() {
 function parseCooldownHours() {
   const v = Number(process.env.REVIEW_SLA_COOLDOWN_HOURS || 12);
   return Number.isFinite(v) ? Math.max(1, v) : 12;
+}
+
+function parseSlaPolicyFromComment(body) {
+  const text = String(body || "");
+  const match = text.match(/<!-- review-os:sla threshold=([0-9]+) cooldown=([0-9]+) escalation=([0-9]+) owners=([^>]*) -->/);
+  if (!match) return null;
+  return {
+    thresholdHours: Number(match[1]),
+    cooldownHours: Number(match[2]),
+    escalationAfterHours: Number(match[3]),
+    owners: String(match[4] || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
+  };
 }
 
 async function ghRequest(url, token, init = {}) {
@@ -74,7 +90,13 @@ async function main() {
     const createdAt = new Date(pr.created_at || 0).getTime();
     if (!createdAt) continue;
     const ageHours = (Date.now() - createdAt) / (1000 * 60 * 60);
-    if (ageHours < thresholdHours) continue;
+    const comments = await ghRequest(`https://api.github.com/repos/${owner}/${repo}/issues/${pr.number}/comments?per_page=100`, token);
+    const reviewComment = (comments || []).find((c) => String(c.body || "").includes(REVIEW_MARKER));
+    const commentPolicy = parseSlaPolicyFromComment(reviewComment?.body || "");
+    const effectiveThreshold = commentPolicy?.thresholdHours || thresholdHours;
+    const effectiveCooldown = commentPolicy?.cooldownHours || cooldownHours;
+    const effectiveEscalation = commentPolicy?.escalationAfterHours || Math.max(effectiveThreshold * 2, thresholdHours);
+    if (ageHours < effectiveThreshold) continue;
 
     const reviews = await ghRequest(`https://api.github.com/repos/${owner}/${repo}/pulls/${pr.number}/reviews?per_page=100`, token);
     const approved = (reviews || []).some((r) => String(r.state || "").toUpperCase() === "APPROVED");
@@ -84,11 +106,13 @@ async function main() {
       "## Review SLA Reminder",
       "",
       `- PR has been open for **${ageHours.toFixed(1)}h** without approval.`,
-      `- SLA threshold: **${thresholdHours}h**`,
+      `- SLA threshold: **${effectiveThreshold}h**`,
+      `- Escalation after: **${effectiveEscalation}h**`,
+      `- Owners: **${commentPolicy?.owners?.length ? commentPolicy.owners.join(", ") : "none"}**`,
       "- Please request/assign reviewers to unblock merge.",
     ].join("\n");
 
-    const mode = await upsertReminder(owner, repo, pr.number, token, body, cooldownHours);
+    const mode = await upsertReminder(owner, repo, pr.number, token, body, effectiveCooldown);
     if (mode !== "cooldown") reminded += 1;
   }
 

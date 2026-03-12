@@ -5,11 +5,14 @@ const CSV = "docs/review-dashboard.csv";
 const REPO_CSV = "docs/repo-baseline.csv";
 const CONFIDENCE_CSV = "docs/review-confidence.csv";
 const LATENCY_CSV = "docs/reviewer-latency.csv";
+const QUEUE_MD = "docs/reviewer-queue.md";
+const QUEUE_CSV = "docs/reviewer-queue.csv";
 const HEATMAP_CSV = "docs/change-risk-heatmap.csv";
 const HEATMAP_JSON = "docs/change-risk-heatmap.json";
 const DRIFT_CSV = "docs/policy-drift.csv";
 const OWNERSHIP_CSV = "docs/finding-ownership.csv";
 const OWNERSHIP_MD = "docs/finding-ownership.md";
+const BADGE_DIR = "docs/badges";
 const OUT_DIR = "site";
 const OUTPUT = `${OUT_DIR}/index.html`;
 
@@ -30,6 +33,10 @@ const confidenceCsvLink = confidenceCsvExists
   : "";
 const latencyCsvExists = fs.existsSync(LATENCY_CSV);
 const latencyCsvLink = latencyCsvExists ? `<div class="meta"><a href="./reviewer-latency.csv">Download Reviewer Latency CSV</a></div>` : "";
+const queueMdExists = fs.existsSync(QUEUE_MD);
+const queueMdLink = queueMdExists ? `<div class="meta"><a href="./reviewer-queue.md">View Reviewer Queue Board (Markdown)</a></div>` : "";
+const queueCsvExists = fs.existsSync(QUEUE_CSV);
+const queueCsvLink = queueCsvExists ? `<div class="meta"><a href="./reviewer-queue.csv">Download Reviewer Queue CSV</a></div>` : "";
 const heatmapCsvExists = fs.existsSync(HEATMAP_CSV);
 const heatmapCsvLink = heatmapCsvExists ? `<div class="meta"><a href="./change-risk-heatmap.csv">Download Change-Risk Heatmap CSV</a></div>` : "";
 const heatmapJsonExists = fs.existsSync(HEATMAP_JSON);
@@ -44,6 +51,8 @@ const ownershipMdExists = fs.existsSync(OWNERSHIP_MD);
 const ownershipMdLink = ownershipMdExists
   ? `<div class="meta"><a href="./finding-ownership.md">View Finding Ownership Report (Markdown)</a></div>`
   : "";
+const badgeDirExists = fs.existsSync(BADGE_DIR);
+const badgeLink = badgeDirExists ? `<div class="meta"><a href="./badges/readiness.json">View Historical Badge Endpoints</a></div>` : "";
 
 const html = `<!doctype html>
 <html lang="en">
@@ -67,11 +76,14 @@ const html = `<!doctype html>
     ${repoCsvLink}
     ${confidenceCsvLink}
     ${latencyCsvLink}
+    ${queueMdLink}
+    ${queueCsvLink}
     ${heatmapCsvLink}
     ${heatmapJsonLink}
     ${driftCsvLink}
     ${ownershipCsvLink}
     ${ownershipMdLink}
+    ${badgeLink}
     <pre>${escaped}</pre>
   </div>
 </body>
@@ -91,6 +103,12 @@ if (confidenceCsvExists) {
 if (latencyCsvExists) {
   fs.copyFileSync(LATENCY_CSV, `${OUT_DIR}/reviewer-latency.csv`);
 }
+if (queueMdExists) {
+  fs.copyFileSync(QUEUE_MD, `${OUT_DIR}/reviewer-queue.md`);
+}
+if (queueCsvExists) {
+  fs.copyFileSync(QUEUE_CSV, `${OUT_DIR}/reviewer-queue.csv`);
+}
 if (heatmapCsvExists) {
   fs.copyFileSync(HEATMAP_CSV, `${OUT_DIR}/change-risk-heatmap.csv`);
 }
@@ -105,5 +123,8 @@ if (ownershipCsvExists) {
 }
 if (ownershipMdExists) {
   fs.copyFileSync(OWNERSHIP_MD, `${OUT_DIR}/finding-ownership.md`);
+}
+if (badgeDirExists) {
+  fs.cpSync(BADGE_DIR, `${OUT_DIR}/badges`, { recursive: true });
 }
 console.log(`Site written: ${OUTPUT}`);

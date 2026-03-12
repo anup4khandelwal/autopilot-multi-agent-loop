@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.1.9
+
+- Added live reviewer queue board exports (`docs/reviewer-queue.md`, `docs/reviewer-queue.csv`)
+- Added owner-specific SLA thresholds and escalation timers
+- Added context budget advisor for PR review prompt planning
+- Added risk-aware merge window policy for high-risk PRs
+- Added historical benchmark badge endpoints (`docs/badges/*.json`)
+
 ## v0.1.8
 
 - Added cross-PR duplicate detection using regression signatures

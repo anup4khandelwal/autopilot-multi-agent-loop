@@ -144,6 +144,8 @@ function loadConfig(configPath = ".reviewos.yml") {
       enabled: false,
       threshold_hours: 24,
       cooldown_hours: 12,
+      escalation_after_hours: 36,
+      owner_policies: {},
     },
     incident_safe: {
       enabled: false,
@@ -195,6 +197,20 @@ function loadConfig(configPath = ".reviewos.yml") {
       enabled: true,
       drift_delta: 8,
     },
+    context_budget: {
+      enabled: true,
+      low_tokens: 16000,
+      medium_tokens: 48000,
+      high_tokens: 96000,
+    },
+    merge_window: {
+      enabled: false,
+      time_zone: "UTC",
+      allowed_weekdays: "1,2,3,4,5",
+      start_hour: 9,
+      end_hour: 18,
+      high_risk_security_threshold: 78,
+    },
     finding_ownership: {
       default_owner: "unassigned",
       rules: {},
@@ -236,7 +252,7 @@ function loadConfig(configPath = ".reviewos.yml") {
     reviewer_routing: { ...defaults.reviewer_routing },
     labels: { ...defaults.labels },
     fix_suggestions: { ...defaults.fix_suggestions },
-    reviewer_sla: { ...defaults.reviewer_sla },
+    reviewer_sla: { ...defaults.reviewer_sla, owner_policies: { ...(defaults.reviewer_sla?.owner_policies || {}) } },
     incident_safe: { ...defaults.incident_safe },
     adaptive_thresholds: { ...defaults.adaptive_thresholds },
     escalation: { ...defaults.escalation, levels: { ...(defaults.escalation?.levels || {}) } },
@@ -244,6 +260,8 @@ function loadConfig(configPath = ".reviewos.yml") {
     cross_pr_duplicates: { ...defaults.cross_pr_duplicates },
     auto_split: { ...defaults.auto_split },
     policy_drift: { ...defaults.policy_drift },
+    context_budget: { ...defaults.context_budget },
+    merge_window: { ...defaults.merge_window },
     alerts: { ...defaults.alerts },
     prompt_trace: { ...defaults.prompt_trace },
     release_gate: { ...defaults.release_gate },
@@ -1423,6 +1441,120 @@ function detectPolicyDrift({ config, effectiveThresholds }) {
   };
 }
 
+function summarizeFindingOwners(findings) {
+  const counts = new Map();
+  for (const finding of findings || []) {
+    const owner = String(finding.owner || "unassigned");
+    counts.set(owner, (counts.get(owner) || 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([owner, count]) => ({ owner, count }))
+    .sort((a, b) => b.count - a.count || a.owner.localeCompare(b.owner));
+}
+
+function computeOwnerSlaPolicy(config, findings) {
+  const defaults = config.reviewer_sla || {};
+  const ownerPolicies = defaults.owner_policies || {};
+  const owners = summarizeFindingOwners(findings).map((x) => x.owner);
+  const matched = owners
+    .filter((owner) => ownerPolicies[owner] && typeof ownerPolicies[owner] === "object")
+    .map((owner) => ({
+      owner,
+      threshold_hours: Number(ownerPolicies[owner].threshold_hours || defaults.threshold_hours || 24),
+      cooldown_hours: Number(ownerPolicies[owner].cooldown_hours || defaults.cooldown_hours || 12),
+      escalation_after_hours: Number(
+        ownerPolicies[owner].escalation_after_hours || defaults.escalation_after_hours || Math.max(24, Number(defaults.threshold_hours || 24) * 2)
+      ),
+    }));
+
+  const effective = {
+    owners,
+    thresholdHours: matched.length
+      ? Math.min(...matched.map((p) => p.threshold_hours))
+      : Number(defaults.threshold_hours || 24),
+    cooldownHours: matched.length
+      ? Math.min(...matched.map((p) => p.cooldown_hours))
+      : Number(defaults.cooldown_hours || 12),
+    escalationAfterHours: matched.length
+      ? Math.min(...matched.map((p) => p.escalation_after_hours))
+      : Number(defaults.escalation_after_hours || Math.max(24, Number(defaults.threshold_hours || 24) * 2)),
+    matchedPolicies: matched,
+  };
+  return effective;
+}
+
+function buildContextBudgetAdvisor(pr, files, config) {
+  if (!config.context_budget?.enabled) return null;
+  const bodyText = String(pr.body || "");
+  const fileChars = files.map((f) => String(f.filename || "")).join("\n").length;
+  const delta = Number(pr.additions || 0) + Number(pr.deletions || 0);
+  const estimatedTokens = Math.round(bodyText.length / 4 + fileChars / 4 + delta * 0.8);
+  const low = Number(config.context_budget.low_tokens || 16000);
+  const medium = Number(config.context_budget.medium_tokens || 48000);
+  const high = Number(config.context_budget.high_tokens || 96000);
+
+  let level = "low";
+  let strategy = "Full PR context likely fits. Use direct review with file-by-file reasoning.";
+  if (estimatedTokens >= high) {
+    level = "high";
+    strategy = "Compress aggressively: group by directory, summarize unchanged patterns, and review only risky files in full detail.";
+  } else if (estimatedTokens >= medium) {
+    level = "medium";
+    strategy = "Use a staged prompt: PR summary first, then expand only risk-sensitive or failing areas.";
+  } else if (estimatedTokens >= low) {
+    level = "moderate";
+    strategy = "Keep PR description, changed file list, and top-risk diffs; omit low-signal boilerplate files.";
+  }
+
+  return {
+    estimatedTokens,
+    level,
+    strategy,
+  };
+}
+
+function zonedClock(timeZone) {
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    weekday: "short",
+    hour: "2-digit",
+    hour12: false,
+  });
+  const parts = formatter.formatToParts(new Date());
+  const weekday = String(parts.find((p) => p.type === "weekday")?.value || "Mon").toLowerCase();
+  const hour = Number(parts.find((p) => p.type === "hour")?.value || 0);
+  const weekdayMap = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 };
+  return { weekday: weekdayMap[weekday] ?? 1, hour };
+}
+
+function evaluateMergeWindow({ config, result, effectiveThresholds, matchedRules }) {
+  if (!config.merge_window?.enabled) return { blocked: false, reason: "", highRisk: false, clock: null };
+  const highRisk =
+    (result.grouped?.critical?.length || 0) > 0 ||
+    Number(result.scores?.security || 0) < Number(config.merge_window.high_risk_security_threshold || effectiveThresholds.security_warning || 78) ||
+    (matchedRules || []).length > 0;
+  if (!highRisk) return { blocked: false, reason: "", highRisk: false, clock: null };
+
+  const timeZone = String(config.merge_window.time_zone || "UTC");
+  const clock = zonedClock(timeZone);
+  const allowedDays = splitList(config.merge_window.allowed_weekdays).map((x) => Number(x));
+  const startHour = Number(config.merge_window.start_hour || 9);
+  const endHour = Number(config.merge_window.end_hour || 18);
+  const dayAllowed = allowedDays.length ? allowedDays.includes(clock.weekday) : true;
+  const hourAllowed = clock.hour >= startHour && clock.hour < endHour;
+
+  if (dayAllowed && hourAllowed) {
+    return { blocked: false, reason: "", highRisk: true, clock: { ...clock, timeZone } };
+  }
+
+  return {
+    blocked: true,
+    reason: `High-risk PRs may merge only during ${allowedDays.join(",")} ${startHour}:00-${endHour}:00 (${timeZone}). Current window: weekday=${clock.weekday}, hour=${clock.hour}.`,
+    highRisk: true,
+    clock: { ...clock, timeZone },
+  };
+}
+
 function buildNextSteps(result, thresholds) {
   const nextSteps = [];
   const { grouped, scores } = result;
@@ -1448,6 +1580,9 @@ function buildComment({
   checklist = [],
   escalationPlan = [],
   splitRecommendation = null,
+  ownerSla = null,
+  contextBudget = null,
+  mergeWindow = null,
 }) {
   const fmt = (items, icon) => (items.length ? items.map((f) => `- ${icon} **${f.lens}**: ${f.message}`).join("\n") : "- None");
 
@@ -1479,8 +1614,18 @@ function buildComment({
   const splitSection = splitRecommendation
     ? `### Auto-Split Recommendation\n- Current scope: ${splitRecommendation.changedFiles} files, ${splitRecommendation.changedLines} lines\n- Suggested split boundaries:\n${splitRecommendation.groups.map((g) => `  - ${g.group} (${g.count} files)`).join("\n")}`
     : "";
+  const slaSection = ownerSla
+    ? `### SLA Policy\n- Owners: ${ownerSla.owners.length ? ownerSla.owners.join(", ") : "none"}\n- Threshold hours: ${ownerSla.thresholdHours}\n- Cooldown hours: ${ownerSla.cooldownHours}\n- Escalation after hours: ${ownerSla.escalationAfterHours}`
+    : "";
+  const contextSection = contextBudget
+    ? `### Context Budget Advisor\n- Estimated prompt budget: ${contextBudget.estimatedTokens} tokens\n- Level: ${contextBudget.level}\n- Strategy: ${contextBudget.strategy}`
+    : "";
+  const mergeWindowSection = mergeWindow?.highRisk
+    ? `### Merge Window Policy\n- High risk: Yes\n- Blocked now: ${mergeWindow.blocked ? "Yes" : "No"}\n- Rule: ${mergeWindow.reason || `Current window allowed in ${mergeWindow.clock?.timeZone || "UTC"}.`}`
+    : "";
 
   return `${MARKER}
+<!-- review-os:sla threshold=${ownerSla?.thresholdHours || ""} cooldown=${ownerSla?.cooldownHours || ""} escalation=${ownerSla?.escalationAfterHours || ""} owners=${(ownerSla?.owners || []).join(",")} -->
 ## ReviewOS Copilot Report
 
 **PR:** #${pr.number} - ${pr.title}
@@ -1505,9 +1650,15 @@ ${fixSection}
 
 ${checklistSection}
 
+${slaSection}
+
+${contextSection}
+
 ${escalationSection}
 
 ${splitSection}
+
+${mergeWindowSection}
 
 ### Findings
 
@@ -1649,7 +1800,7 @@ function writeSarifReport(repoSlug, pr, result) {
         tool: {
           driver: {
             name: "review-os",
-            version: "0.1.7",
+            version: "0.1.9",
             informationUri: "https://github.com/anup4khandelwal/autopilot-multi-agent-loop",
             rules: findings.map((f, idx) => ({
               id: `reviewos-${idx + 1}`,
@@ -1785,6 +1936,9 @@ function writeStepSummary({
   effectiveThresholds = {},
   escalationPlan = [],
   regression = {},
+  ownerSla = null,
+  contextBudget = null,
+  mergeWindow = null,
 }) {
   const summaryPath = process.env.GITHUB_STEP_SUMMARY;
   if (!summaryPath) return;
@@ -1819,6 +1973,9 @@ function writeStepSummary({
     "",
     `- Effective thresholds: eng=${effectiveThresholds.engineering_warning ?? "n/a"}, product=${effectiveThresholds.product_warning ?? "n/a"}, design=${effectiveThresholds.design_warning ?? "n/a"}, security=${effectiveThresholds.security_warning ?? "n/a"}`,
     `- Escalation levels: ${escalationPlan.length ? escalationPlan.map((e) => e.level).join(", ") : "none"}`,
+    `- SLA threshold: ${ownerSla?.thresholdHours ?? "n/a"}h; escalation after: ${ownerSla?.escalationAfterHours ?? "n/a"}h`,
+    `- Context budget: ${contextBudget ? `${contextBudget.estimatedTokens} tokens (${contextBudget.level})` : "n/a"}`,
+    `- Merge window blocked: ${mergeWindow?.blocked ? "yes" : "no"}`,
     "",
     "### Next Steps",
     ...nextSteps.map((s) => `- ${s}`),
@@ -1898,8 +2055,12 @@ async function main() {
   const nextSteps = buildNextSteps(result, effectiveThresholds);
   const fixSuggestions = buildFixSuggestions(result, files, config);
   const splitRecommendation = buildSplitRecommendation(files, pr, config);
+  const contextBudget = buildContextBudgetAdvisor(pr, files, config);
   if (splitRecommendation) {
     nextSteps.unshift("Split this PR into smaller domain-focused PRs using suggested boundaries.");
+  }
+  if (contextBudget?.level === "high") {
+    nextSteps.unshift("Use a compressed review context strategy because this PR exceeds a practical direct prompt budget.");
   }
 
   const codeownerRules = loadCodeowners();
@@ -1996,6 +2157,7 @@ async function main() {
   }
 
   result.findings = applyFindingOwnership(result.findings, files, config);
+  const ownerSla = computeOwnerSlaPolicy(config, result.findings);
   if (reviewerRoutingFinal?.loadBalance?.cappedUsers?.length || reviewerRoutingFinal?.loadBalance?.cappedTeams?.length) {
     result.findings = dedupeFindings([
       ...result.findings,
@@ -2030,6 +2192,24 @@ async function main() {
   if (escalationPlan.length) {
     nextSteps.unshift(`Execute escalation plan: ${escalationPlan.map((p) => p.level).join(", ")}`);
   }
+  const mergeWindow = evaluateMergeWindow({
+    config,
+    result,
+    effectiveThresholds,
+    matchedRules: result.matchedPathRules || [],
+  });
+  if (mergeWindow.blocked) {
+    result.findings = dedupeFindings([
+      ...result.findings,
+      {
+        severity: "critical",
+        lens: "MergeWindow",
+        message: mergeWindow.reason,
+      },
+    ]);
+    result.grouped = summarizeFindings(result.findings);
+    nextSteps.unshift("Wait for the allowed merge window before merging this high-risk PR.");
+  }
 
   const requiredCoverage = {
     required,
@@ -2053,11 +2233,18 @@ async function main() {
     checklist,
     escalationPlan,
     splitRecommendation,
+    ownerSla,
+    contextBudget,
+    mergeWindow,
   });
   const autoRequestAttempted = reviewerRoutingFinal.enabled && reviewerRoutingFinal.autoRequest;
   const approvedByReviewer = (reviews || []).some((r) => String(r.state || "").toUpperCase() === "APPROVED");
   const prAgeHours = pr.created_at ? Math.max(0, (Date.now() - new Date(pr.created_at).getTime()) / (1000 * 60 * 60)) : 0;
-  const slaExceeded = config.reviewer_sla?.enabled && !approvedByReviewer && prAgeHours >= Number(config.reviewer_sla?.threshold_hours || 24);
+  const slaExceeded = config.reviewer_sla?.enabled && !approvedByReviewer && prAgeHours >= Number(ownerSla.thresholdHours || config.reviewer_sla?.threshold_hours || 24);
+  const slaEscalated =
+    config.reviewer_sla?.enabled &&
+    !approvedByReviewer &&
+    prAgeHours >= Number(ownerSla.escalationAfterHours || config.reviewer_sla?.escalation_after_hours || 36);
 
   const historyEntry = {
     timestamp: new Date().toISOString(),
@@ -2083,6 +2270,9 @@ async function main() {
     escalationPlan,
     crossPrDuplicates: crossDup.matches,
     policyDrift,
+    ownerSla,
+    contextBudget,
+    mergeWindow,
     promptTracePath: "",
     checklist,
     approvalCount,
@@ -2091,6 +2281,7 @@ async function main() {
       approvedByReviewer,
       prAgeHours: Number(prAgeHours.toFixed(2)),
       exceeded: Boolean(slaExceeded),
+      escalated: Boolean(slaEscalated),
     },
     reviewerLatency: {
       firstReviewAt: firstReviewAt || "",
@@ -2146,6 +2337,9 @@ async function main() {
         splitRecommendation,
         crossPrDuplicates: crossDup.matches,
         policyDrift,
+        ownerSla,
+        contextBudget,
+        mergeWindow,
         regressionSignature: regression.signature,
         regressionRepeats: regression.repeats + 1,
         scorecard,
@@ -2185,7 +2379,9 @@ async function main() {
         "## Review SLA Reminder",
         "",
         `- PR has been waiting **${prAgeHours.toFixed(1)}h** without approval.`,
-        `- Threshold: **${Number(config.reviewer_sla?.threshold_hours || 24)}h**`,
+        `- Threshold: **${Number(ownerSla.thresholdHours || config.reviewer_sla?.threshold_hours || 24)}h**`,
+        `- Owners: **${ownerSla.owners.length ? ownerSla.owners.join(", ") : "none"}**`,
+        `- Escalation after: **${Number(ownerSla.escalationAfterHours || config.reviewer_sla?.escalation_after_hours || 36)}h**`,
         "- Please assign/reassign reviewers or request help from maintainers.",
       ].join("\n");
       const reminder = await upsertSlaReminderComment(
@@ -2194,7 +2390,7 @@ async function main() {
         pr.number,
         token,
         slaBody,
-        Number(config.reviewer_sla?.cooldown_hours || 12)
+        Number(ownerSla.cooldownHours || config.reviewer_sla?.cooldown_hours || 12)
       );
       console.log(`SLA reminder comment: ${reminder.mode}`);
     }
@@ -2236,6 +2432,9 @@ async function main() {
     effectiveThresholds,
     escalationPlan,
     regression,
+    ownerSla,
+    contextBudget,
+    mergeWindow,
   });
 
   if (failOnCritical && result.grouped.critical.length > 0) {
@@ -2245,6 +2444,11 @@ async function main() {
 
   if (config.release_gate?.enabled && isReleasePr(pr, config) && result.grouped.critical.length > 0) {
     console.error("Release gate blocked: unresolved critical findings on release PR.");
+    process.exit(1);
+  }
+
+  if (mergeWindow.blocked) {
+    console.error(`Merge window blocked: ${mergeWindow.reason}`);
     process.exit(1);
   }
 }

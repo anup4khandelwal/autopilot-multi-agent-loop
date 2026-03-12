@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "label": "readiness",
+  "message": "79/100",
+  "color": "yellow",
+  "cacheSeconds": 3600
+}

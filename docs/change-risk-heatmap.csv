@@ -1,6 +1,6 @@
 path,risk_score,critical,warning,runs
-src/auth,46,7,25,5
-.github/workflows,40,6,22,5
-src/payments,11,2,5,1
-src/components,10,0,10,2
-src/middleware,5,0,5,1
+src/auth,97,14,55,10
+.github/workflows,83,12,47,10
+src/payments,23,4,11,2
+src/components,22,0,22,4
+src/middleware,11,0,11,2

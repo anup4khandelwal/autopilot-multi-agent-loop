@@ -41,6 +41,16 @@ reviewer_sla:
   enabled: true
   threshold_hours: 24
   cooldown_hours: 12
+  escalation_after_hours: 36
+  owner_policies:
+    security:
+      threshold_hours: 12
+      cooldown_hours: 6
+      escalation_after_hours: 24
+    platform:
+      threshold_hours: 18
+      cooldown_hours: 8
+      escalation_after_hours: 30
 
 incident_safe:
   enabled: false
@@ -88,6 +98,20 @@ auto_split:
 policy_drift:
   enabled: true
   drift_delta: 8
+
+context_budget:
+  enabled: true
+  low_tokens: 16000
+  medium_tokens: 48000
+  high_tokens: 96000
+
+merge_window:
+  enabled: false
+  time_zone: Asia/Kolkata
+  allowed_weekdays: 1,2,3,4,5
+  start_hour: 10
+  end_hour: 18
+  high_risk_security_threshold: 78
 
 alerts:
   enabled: false

@@ -39,9 +39,14 @@ jobs:
 
       - name: Build review dashboard
         if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           node scripts/build-dashboard.mjs
           node scripts/build-ownership-report.mjs
+          node scripts/build-reviewer-queue.mjs
+          node scripts/build-badges.mjs
 
       - name: Upload Review Memory
         if: always()
@@ -92,9 +97,12 @@ jobs:
             docs/repo-baseline.csv
             docs/review-confidence.csv
             docs/reviewer-latency.csv
+            docs/reviewer-queue.md
+            docs/reviewer-queue.csv
             docs/change-risk-heatmap.csv
             docs/change-risk-heatmap.json
             docs/policy-drift.csv
             docs/finding-ownership.md
             docs/finding-ownership.csv
+            docs/badges
           if-no-files-found: ignore
