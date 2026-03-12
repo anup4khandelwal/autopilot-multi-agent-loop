@@ -1,0 +1,6 @@
+path,risk_score,critical,warning,runs
+src/auth,46,7,25,5
+.github/workflows,40,6,22,5
+src/payments,11,2,5,1
+src/components,10,0,10,2
+src/middleware,5,0,5,1

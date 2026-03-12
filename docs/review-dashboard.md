@@ -1,12 +1,12 @@
 # ReviewOS Trend Dashboard
 
-Generated: 2026-03-12T08:24:23.373Z
+Generated: 2026-03-12T10:05:31.383Z
 
 ## Summary
 
 - Total review runs: 40
 - Average merge readiness: 79.5
-- Last run timestamp: 2026-03-12T08:24:22.909Z
+- Last run timestamp: 2026-03-12T10:05:30.934Z
 
 ## Lens Averages
 
@@ -37,8 +37,8 @@ Generated: 2026-03-12T08:24:23.373Z
 ## Finding Volume
 
 - Critical: 50
-- Warning: 126
-- Info: 79
+- Warning: 136
+- Info: 80
 
 ## Reviewer Coverage Metrics
 
@@ -46,31 +46,67 @@ Generated: 2026-03-12T08:24:23.373Z
 - Total missing reviewer slots (users + teams): 3
 - Auto-request attempts: 10
 - Auto-request success rate: 0.0%
+- Mean time to first review (hours): N/A
 
 ## Merge Readiness Trend (Recent 10)
 
+- 2026-03-12T10:05:30 PR#102: █████████████████░░░ 87.0
+- 2026-03-12T10:05:30 PR#101: ██████████████░░░░░░ 69.0
+- 2026-03-12T10:05:30 PR#101: ███████████████░░░░░ 77.0
+- 2026-03-12T10:05:30 PR#102: █████████████████░░░ 87.0
+- 2026-03-12T10:05:30 PR#101: █████████████████░░░ 84.0
+- 2026-03-12T10:05:30 PR#100: ████████████████░░░░ 82.0
+- 2026-03-12T10:05:30 PR#42: █████████████░░░░░░░ 64.0
+- 2026-03-12T10:05:30 PR#42: ████████████████░░░░ 82.0
 - 2026-03-12T08:24:22 PR#102: █████████████████░░░ 87.0
 - 2026-03-12T08:24:22 PR#101: ██████████████░░░░░░ 69.0
-- 2026-03-12T08:24:22 PR#101: ███████████████░░░░░ 77.0
-- 2026-03-12T08:24:22 PR#102: █████████████████░░░ 87.0
-- 2026-03-12T08:24:22 PR#101: █████████████████░░░ 84.0
-- 2026-03-12T08:24:22 PR#100: ████████████████░░░░ 82.0
-- 2026-03-12T08:24:22 PR#42: █████████████░░░░░░░ 64.0
-- 2026-03-12T08:24:22 PR#42: ████████████████░░░░ 82.0
-- 2026-03-11T16:23:08 PR#102: █████████████████░░░ 87.0
-- 2026-03-11T16:23:08 PR#101: ██████████████░░░░░░ 69.0
 
 ## Readiness Anomalies
 
 | Timestamp | PR | Baseline | Current | Drop |
 |---|---|---|---|---|
-| 2026-03-11T16:03:34 | 42 | 85.3 | 64.0 | 21.3 |
+| 2026-03-11T16:03:56 | 42 | 85.3 | 64.0 | 21.3 |
 
 ## Multi-Repo Baseline Compare
 
 | Repository | Runs | Avg Readiness | Critical Findings | Warnings |
 |---|---|---|---|---|
-| local/review-os | 40 | 79.5 | 50 | 126 |
+| local/review-os | 40 | 79.5 | 50 | 136 |
+
+## Change-Risk Heatmap (Top Paths)
+
+| Path | Risk Score | Critical | Warning | Runs |
+|---|---|---|---|---|
+| src/auth | 46 | 7 | 25 | 5 |
+| .github/workflows | 40 | 6 | 22 | 5 |
+| src/payments | 11 | 2 | 5 | 1 |
+| src/components | 10 | 0 | 10 | 2 |
+| src/middleware | 5 | 0 | 5 | 1 |
+
+## Policy Drift (Recent)
+
+| Timestamp | Threshold | Configured | Effective | Delta |
+|---|---|---|---|---|
+| 2026-03-12T10:05:30 | security_warning | 75 | 60 | -15 |
+| 2026-03-12T10:05:30 | design_warning | 75 | 70 | -5 |
+| 2026-03-12T10:05:30 | product_warning | 70 | 85 | 15 |
+| 2026-03-12T10:05:30 | engineering_warning | 70 | 71 | 1 |
+| 2026-03-12T10:05:30 | security_warning | 85 | 64 | -21 |
+| 2026-03-12T10:05:30 | design_warning | 78 | 72 | -6 |
+| 2026-03-12T10:05:30 | product_warning | 75 | 88 | 13 |
+| 2026-03-12T10:05:30 | engineering_warning | 75 | 74 | -1 |
+| 2026-03-12T10:05:30 | security_warning | 75 | 60 | -15 |
+| 2026-03-12T10:05:30 | design_warning | 75 | 71 | -4 |
+| 2026-03-12T10:05:30 | product_warning | 70 | 85 | 15 |
+| 2026-03-12T10:05:30 | engineering_warning | 70 | 71 | 1 |
+| 2026-03-12T10:05:30 | security_warning | 75 | 60 | -15 |
+| 2026-03-12T10:05:30 | design_warning | 75 | 71 | -4 |
+| 2026-03-12T10:05:30 | product_warning | 70 | 85 | 15 |
+| 2026-03-12T10:05:30 | engineering_warning | 70 | 71 | 1 |
+| 2026-03-12T10:05:30 | security_warning | 75 | 60 | -15 |
+| 2026-03-12T10:05:30 | design_warning | 75 | 70 | -5 |
+| 2026-03-12T10:05:30 | product_warning | 70 | 85 | 15 |
+| 2026-03-12T10:05:30 | engineering_warning | 70 | 71 | 1 |
 
 ## Critical by Path Policy Rule
 
@@ -89,7 +125,7 @@ Generated: 2026-03-12T08:24:23.373Z
 | warning | Security | 30 | Sensitive domain changes detected (1 file(s)). |
 | warning | Design | 27 | Frontend changes detected without UI evidence (screenshots/UX notes). |
 | info | Memory | 26 | Detected 4 recurring finding(s) from previous review cycle. |
-| info | Memory | 13 | Detected 5 recurring finding(s) from previous review cycle. |
+| info | Memory | 14 | Detected 5 recurring finding(s) from previous review cycle. |
 | info | Engineering | 10 | Risk-sensitive files touched (3). Ensure focused reviewer coverage. |
 
 ## Notes
@@ -99,3 +135,6 @@ Generated: 2026-03-12T08:24:23.373Z
 - CSV export: `docs/review-dashboard.csv`
 - Repo baseline CSV: `docs/repo-baseline.csv`
 - Confidence CSV: `docs/review-confidence.csv`
+- Latency CSV: `docs/reviewer-latency.csv`
+- Heatmap CSV/JSON: `docs/change-risk-heatmap.csv`, `docs/change-risk-heatmap.json`
+- Policy drift CSV: `docs/policy-drift.csv`

@@ -75,6 +75,20 @@ regression_signatures:
   enabled: true
   repeat_threshold: 2
 
+cross_pr_duplicates:
+  enabled: true
+  max_matches: 5
+
+auto_split:
+  enabled: true
+  max_files: 20
+  max_lines: 800
+  max_groups: 4
+
+policy_drift:
+  enabled: true
+  drift_delta: 8
+
 alerts:
   enabled: false
   slack_webhook_env: SLACK_WEBHOOK_URL

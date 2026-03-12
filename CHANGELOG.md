@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.1.8
+
+- Added cross-PR duplicate detection using regression signatures
+- Added auto-split recommendations for oversized PRs
+- Added reviewer response latency analytics and CSV export
+- Added change-risk heatmap exports (CSV/JSON)
+- Added policy drift detection and drift CSV export
+
 ## v0.1.7
 
 - Added reviewer capacity caps for balanced reviewer assignment

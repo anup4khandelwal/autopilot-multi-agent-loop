@@ -4,6 +4,10 @@ const INPUT = "docs/review-dashboard.md";
 const CSV = "docs/review-dashboard.csv";
 const REPO_CSV = "docs/repo-baseline.csv";
 const CONFIDENCE_CSV = "docs/review-confidence.csv";
+const LATENCY_CSV = "docs/reviewer-latency.csv";
+const HEATMAP_CSV = "docs/change-risk-heatmap.csv";
+const HEATMAP_JSON = "docs/change-risk-heatmap.json";
+const DRIFT_CSV = "docs/policy-drift.csv";
 const OWNERSHIP_CSV = "docs/finding-ownership.csv";
 const OWNERSHIP_MD = "docs/finding-ownership.md";
 const OUT_DIR = "site";
@@ -24,6 +28,14 @@ const confidenceCsvExists = fs.existsSync(CONFIDENCE_CSV);
 const confidenceCsvLink = confidenceCsvExists
   ? `<div class="meta"><a href="./review-confidence.csv">Download Confidence Bands CSV</a></div>`
   : "";
+const latencyCsvExists = fs.existsSync(LATENCY_CSV);
+const latencyCsvLink = latencyCsvExists ? `<div class="meta"><a href="./reviewer-latency.csv">Download Reviewer Latency CSV</a></div>` : "";
+const heatmapCsvExists = fs.existsSync(HEATMAP_CSV);
+const heatmapCsvLink = heatmapCsvExists ? `<div class="meta"><a href="./change-risk-heatmap.csv">Download Change-Risk Heatmap CSV</a></div>` : "";
+const heatmapJsonExists = fs.existsSync(HEATMAP_JSON);
+const heatmapJsonLink = heatmapJsonExists ? `<div class="meta"><a href="./change-risk-heatmap.json">Download Change-Risk Heatmap JSON</a></div>` : "";
+const driftCsvExists = fs.existsSync(DRIFT_CSV);
+const driftCsvLink = driftCsvExists ? `<div class="meta"><a href="./policy-drift.csv">Download Policy Drift CSV</a></div>` : "";
 const ownershipCsvExists = fs.existsSync(OWNERSHIP_CSV);
 const ownershipCsvLink = ownershipCsvExists
   ? `<div class="meta"><a href="./finding-ownership.csv">Download Finding Ownership CSV</a></div>`
@@ -54,6 +66,10 @@ const html = `<!doctype html>
     ${csvLink}
     ${repoCsvLink}
     ${confidenceCsvLink}
+    ${latencyCsvLink}
+    ${heatmapCsvLink}
+    ${heatmapJsonLink}
+    ${driftCsvLink}
     ${ownershipCsvLink}
     ${ownershipMdLink}
     <pre>${escaped}</pre>
@@ -71,6 +87,18 @@ if (repoCsvExists) {
 }
 if (confidenceCsvExists) {
   fs.copyFileSync(CONFIDENCE_CSV, `${OUT_DIR}/review-confidence.csv`);
+}
+if (latencyCsvExists) {
+  fs.copyFileSync(LATENCY_CSV, `${OUT_DIR}/reviewer-latency.csv`);
+}
+if (heatmapCsvExists) {
+  fs.copyFileSync(HEATMAP_CSV, `${OUT_DIR}/change-risk-heatmap.csv`);
+}
+if (heatmapJsonExists) {
+  fs.copyFileSync(HEATMAP_JSON, `${OUT_DIR}/change-risk-heatmap.json`);
+}
+if (driftCsvExists) {
+  fs.copyFileSync(DRIFT_CSV, `${OUT_DIR}/policy-drift.csv`);
 }
 if (ownershipCsvExists) {
   fs.copyFileSync(OWNERSHIP_CSV, `${OUT_DIR}/finding-ownership.csv`);

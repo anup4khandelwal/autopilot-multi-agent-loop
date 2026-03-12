@@ -6,6 +6,10 @@ const OUTPUT = "docs/review-dashboard.md";
 const OUTPUT_CSV = "docs/review-dashboard.csv";
 const OUTPUT_REPO_CSV = "docs/repo-baseline.csv";
 const OUTPUT_CONFIDENCE_CSV = "docs/review-confidence.csv";
+const OUTPUT_LATENCY_CSV = "docs/reviewer-latency.csv";
+const OUTPUT_HEATMAP_CSV = "docs/change-risk-heatmap.csv";
+const OUTPUT_HEATMAP_JSON = "docs/change-risk-heatmap.json";
+const OUTPUT_DRIFT_CSV = "docs/policy-drift.csv";
 
 function ensureDir(dirPath) {
   fs.mkdirSync(dirPath, { recursive: true });
@@ -150,6 +154,9 @@ function buildDashboard(runs) {
   let reviewerMissRuns = 0;
   let autoRequestAttempts = 0;
   let autoRequestSuccess = 0;
+  const latencySeries = [];
+  const driftRows = [];
+  const heatmap = new Map();
 
   const criticalPathCounts = new Map();
 
@@ -179,6 +186,37 @@ function buildDashboard(runs) {
       autoRequestAttempts += 1;
       if (r.reviewerRouting?.requestedViaRequired) autoRequestSuccess += 1;
     }
+    if (r.reviewerLatency?.firstReviewLatencyHours != null) {
+      const lat = Number(r.reviewerLatency.firstReviewLatencyHours);
+      if (Number.isFinite(lat)) latencySeries.push(lat);
+    }
+    if (r.policyDrift?.driftRows) {
+      for (const d of r.policyDrift.driftRows) {
+        driftRows.push({
+          timestamp: r.timestamp || "",
+          key: d.key,
+          configured: Number(d.configured || 0),
+          effective: Number(d.effective || 0),
+          delta: Number(d.delta || 0),
+        });
+      }
+    }
+    const files = Array.isArray(r.filesChanged) ? r.filesChanged : [];
+    if (files.length) {
+      const sev = {
+        critical: findings.filter((f) => f.severity === "critical").length,
+        warning: findings.filter((f) => f.severity === "warning").length,
+      };
+      for (const p of files) {
+        const group = p.split("/").slice(0, 2).join("/") || p;
+        const key = group || "root";
+        if (!heatmap.has(key)) heatmap.set(key, { path: key, critical: 0, warning: 0, totalRuns: 0 });
+        const row = heatmap.get(key);
+        row.critical += sev.critical;
+        row.warning += sev.warning;
+        row.totalRuns += 1;
+      }
+    }
   }
 
   const topFindings = [...findingFreq.entries()]
@@ -197,6 +235,7 @@ function buildDashboard(runs) {
   const generatedAt = new Date().toISOString();
 
   const autoRequestRate = autoRequestAttempts ? (autoRequestSuccess / autoRequestAttempts) * 100 : 0;
+  const avgLatency = avg(latencySeries);
   const readinessCi = ci95(readiness);
   const engineeringCi = ci95(lens.engineering);
   const productCi = ci95(lens.product);
@@ -250,6 +289,11 @@ function buildDashboard(runs) {
       warning: data.warning,
     }))
     .sort((a, b) => b.readinessAvg - a.readinessAvg);
+  const heatmapRows = [...heatmap.values()]
+    .map((r) => ({ ...r, riskScore: r.critical * 3 + r.warning }))
+    .sort((a, b) => b.riskScore - a.riskScore)
+    .slice(0, 12);
+  const driftRecent = driftRows.slice(-20).reverse();
 
   return `# ReviewOS Trend Dashboard
 
@@ -302,6 +346,7 @@ ${buildTable(
 - Total missing reviewer slots (users + teams): ${reviewerMissCount}
 - Auto-request attempts: ${autoRequestAttempts}
 - Auto-request success rate: ${autoRequestRate.toFixed(1)}%
+- Mean time to first review (hours): ${avgLatency ? avgLatency.toFixed(2) : "N/A"}
 
 ## Merge Readiness Trend (Recent 10)
 
@@ -314,6 +359,14 @@ ${anomalies.length ? buildTable(["Timestamp", "PR", "Baseline", "Current", "Drop
 ## Multi-Repo Baseline Compare
 
 ${repoRows.length ? buildTable(["Repository", "Runs", "Avg Readiness", "Critical Findings", "Warnings"], repoRows.map((r) => [r.repo, String(r.runs), r.readinessAvg.toFixed(1), String(r.critical), String(r.warning)])) : "No repository baseline data yet."}
+
+## Change-Risk Heatmap (Top Paths)
+
+${heatmapRows.length ? buildTable(["Path", "Risk Score", "Critical", "Warning", "Runs"], heatmapRows.map((r) => [r.path, String(r.riskScore), String(r.critical), String(r.warning), String(r.totalRuns)])) : "No path heatmap data yet."}
+
+## Policy Drift (Recent)
+
+${driftRecent.length ? buildTable(["Timestamp", "Threshold", "Configured", "Effective", "Delta"], driftRecent.map((d) => [String(d.timestamp).slice(0, 19), d.key, d.configured.toFixed(0), d.effective.toFixed(0), d.delta.toFixed(0)])) : "No policy drift data yet."}
 
 ## Critical by Path Policy Rule
 
@@ -330,6 +383,9 @@ ${topFindings.length ? buildTable(["Severity", "Lens", "Count", "Finding"], topF
 - CSV export: \`${OUTPUT_CSV}\`
 - Repo baseline CSV: \`${OUTPUT_REPO_CSV}\`
 - Confidence CSV: \`${OUTPUT_CONFIDENCE_CSV}\`
+- Latency CSV: \`${OUTPUT_LATENCY_CSV}\`
+- Heatmap CSV/JSON: \`${OUTPUT_HEATMAP_CSV}\`, \`${OUTPUT_HEATMAP_JSON}\`
+- Policy drift CSV: \`${OUTPUT_DRIFT_CSV}\`
 `;
 }
 
@@ -375,6 +431,53 @@ function writeConfidenceCsv(runs) {
   fs.writeFileSync(OUTPUT_CONFIDENCE_CSV, `${lines.join("\n")}\n`);
 }
 
+function writeLatencyCsv(runs) {
+  const lines = ["timestamp,pr,first_review_latency_hours"];
+  for (const r of runs) {
+    const lat = r.reviewerLatency?.firstReviewLatencyHours;
+    if (lat == null) continue;
+    lines.push(`${r.timestamp || ""},${r.pr || ""},${Number(lat).toFixed(2)}`);
+  }
+  fs.writeFileSync(OUTPUT_LATENCY_CSV, `${lines.join("\n")}\n`);
+}
+
+function writeHeatmapExports(runs) {
+  const map = new Map();
+  for (const r of runs) {
+    const findings = Array.isArray(r.findings) ? r.findings : [];
+    const critical = findings.filter((f) => f.severity === "critical").length;
+    const warning = findings.filter((f) => f.severity === "warning").length;
+    const files = Array.isArray(r.filesChanged) ? r.filesChanged : [];
+    for (const p of files) {
+      const key = String(p || "").split("/").slice(0, 2).join("/") || "root";
+      if (!map.has(key)) map.set(key, { path: key, critical: 0, warning: 0, runs: 0 });
+      const row = map.get(key);
+      row.critical += critical;
+      row.warning += warning;
+      row.runs += 1;
+    }
+  }
+  const rows = [...map.values()]
+    .map((r) => ({ ...r, risk_score: r.critical * 3 + r.warning }))
+    .sort((a, b) => b.risk_score - a.risk_score);
+  const csv = ["path,risk_score,critical,warning,runs", ...rows.map((r) => `${r.path},${r.risk_score},${r.critical},${r.warning},${r.runs}`)];
+  fs.writeFileSync(OUTPUT_HEATMAP_CSV, `${csv.join("\n")}\n`);
+  fs.writeFileSync(OUTPUT_HEATMAP_JSON, `${JSON.stringify(rows, null, 2)}\n`);
+}
+
+function writePolicyDriftCsv(runs) {
+  const lines = ["timestamp,pr,threshold,configured,effective,delta"];
+  for (const r of runs) {
+    const rows = r.policyDrift?.driftRows || [];
+    for (const d of rows) {
+      lines.push(
+        `${r.timestamp || ""},${r.pr || ""},${d.key || ""},${Number(d.configured || 0)},${Number(d.effective || 0)},${Number(d.delta || 0)}`
+      );
+    }
+  }
+  fs.writeFileSync(OUTPUT_DRIFT_CSV, `${lines.join("\n")}\n`);
+}
+
 function main() {
   ensureDir("docs");
   const runs = collectRuns();
@@ -383,10 +486,17 @@ function main() {
   writeCsv(runs);
   writeRepoCsv(runs);
   writeConfidenceCsv(runs);
+  writeLatencyCsv(runs);
+  writeHeatmapExports(runs);
+  writePolicyDriftCsv(runs);
   console.log(`Dashboard written: ${OUTPUT}`);
   console.log(`Dashboard CSV written: ${OUTPUT_CSV}`);
   console.log(`Repo baseline CSV written: ${OUTPUT_REPO_CSV}`);
   console.log(`Confidence CSV written: ${OUTPUT_CONFIDENCE_CSV}`);
+  console.log(`Latency CSV written: ${OUTPUT_LATENCY_CSV}`);
+  console.log(`Heatmap CSV written: ${OUTPUT_HEATMAP_CSV}`);
+  console.log(`Heatmap JSON written: ${OUTPUT_HEATMAP_JSON}`);
+  console.log(`Policy drift CSV written: ${OUTPUT_DRIFT_CSV}`);
   console.log(`Runs analyzed: ${runs.length}`);
 }
 

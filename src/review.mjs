@@ -181,6 +181,20 @@ function loadConfig(configPath = ".reviewos.yml") {
       enabled: true,
       repeat_threshold: 2,
     },
+    cross_pr_duplicates: {
+      enabled: true,
+      max_matches: 5,
+    },
+    auto_split: {
+      enabled: true,
+      max_files: 20,
+      max_lines: 800,
+      max_groups: 4,
+    },
+    policy_drift: {
+      enabled: true,
+      drift_delta: 8,
+    },
     finding_ownership: {
       default_owner: "unassigned",
       rules: {},
@@ -227,6 +241,9 @@ function loadConfig(configPath = ".reviewos.yml") {
     adaptive_thresholds: { ...defaults.adaptive_thresholds },
     escalation: { ...defaults.escalation, levels: { ...(defaults.escalation?.levels || {}) } },
     regression_signatures: { ...defaults.regression_signatures },
+    cross_pr_duplicates: { ...defaults.cross_pr_duplicates },
+    auto_split: { ...defaults.auto_split },
+    policy_drift: { ...defaults.policy_drift },
     alerts: { ...defaults.alerts },
     prompt_trace: { ...defaults.prompt_trace },
     release_gate: { ...defaults.release_gate },
@@ -1323,6 +1340,89 @@ function writeQualityScorecard({ repoSlug, pr, result, repoRuns, effectiveThresh
   return { jsonPath, mdPath, mergePercentile, lensPercentiles };
 }
 
+function topPathGroup(filePath) {
+  const p = String(filePath || "");
+  const parts = p.split("/").filter(Boolean);
+  if (parts.length >= 2) return `${parts[0]}/${parts[1]}`;
+  return parts[0] || "root";
+}
+
+function buildSplitRecommendation(files, pr, config) {
+  if (!config.auto_split?.enabled) return null;
+  const maxFiles = Math.max(1, Number(config.auto_split.max_files || 20));
+  const maxLines = Math.max(1, Number(config.auto_split.max_lines || 800));
+  const changedFiles = files.length;
+  const changedLines = Number(pr.additions || 0) + Number(pr.deletions || 0);
+  if (changedFiles <= maxFiles && changedLines <= maxLines) return null;
+
+  const groups = new Map();
+  for (const f of files) {
+    const g = topPathGroup(f.filename);
+    groups.set(g, (groups.get(g) || 0) + 1);
+  }
+  const top = [...groups.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, Math.max(1, Number(config.auto_split.max_groups || 4)));
+  return {
+    changedFiles,
+    changedLines,
+    groups: top.map(([group, count]) => ({ group, count })),
+  };
+}
+
+function detectCrossPrDuplicates({ repoRuns, prNumber, signature, config }) {
+  if (!config.cross_pr_duplicates?.enabled || !signature) return { matches: [], finding: null };
+  const latestByPr = new Map();
+  for (const run of repoRuns || []) {
+    const n = Number(run.pr || 0);
+    if (!n) continue;
+    const ts = String(run.timestamp || "");
+    const prev = latestByPr.get(n);
+    if (!prev || ts > prev.ts) latestByPr.set(n, { ts, run });
+  }
+
+  const matches = [];
+  for (const [n, rec] of latestByPr.entries()) {
+    if (n === Number(prNumber)) continue;
+    if (String(rec.run.regressionSignature || "") === signature) {
+      matches.push(n);
+    }
+  }
+  matches.sort((a, b) => b - a);
+  const limited = matches.slice(0, Math.max(1, Number(config.cross_pr_duplicates.max_matches || 5)));
+  if (!limited.length) return { matches: [], finding: null };
+  return {
+    matches: limited,
+    finding: {
+      severity: "warning",
+      lens: "CrossPR",
+      message: `Same regression signature seen in other PRs: ${limited.map((n) => `#${n}`).join(", ")}.`,
+    },
+  };
+}
+
+function detectPolicyDrift({ config, effectiveThresholds }) {
+  if (!config.policy_drift?.enabled) return { driftRows: [], finding: null };
+  const deltaLimit = Math.max(1, Number(config.policy_drift.drift_delta || 8));
+  const base = config.thresholds || {};
+  const keys = ["engineering_warning", "product_warning", "design_warning", "security_warning"];
+  const driftRows = keys.map((k) => {
+    const configured = Number(base[k] || 0);
+    const effective = Number(effectiveThresholds[k] || configured);
+    return { key: k, configured, effective, delta: effective - configured };
+  });
+  const drifted = driftRows.filter((r) => Math.abs(r.delta) >= deltaLimit);
+  if (!drifted.length) return { driftRows, finding: null };
+  return {
+    driftRows,
+    finding: {
+      severity: "warning",
+      lens: "PolicyDrift",
+      message: `Adaptive thresholds drifted beyond ±${deltaLimit} on: ${drifted.map((d) => `${d.key}(${d.delta > 0 ? "+" : ""}${d.delta})`).join(", ")}.`,
+    },
+  };
+}
+
 function buildNextSteps(result, thresholds) {
   const nextSteps = [];
   const { grouped, scores } = result;
@@ -1338,7 +1438,17 @@ function buildNextSteps(result, thresholds) {
   return nextSteps;
 }
 
-function buildComment({ pr, result, nextSteps, reviewerRouting, requiredCoverage, fixSuggestions = [], checklist = [], escalationPlan = [] }) {
+function buildComment({
+  pr,
+  result,
+  nextSteps,
+  reviewerRouting,
+  requiredCoverage,
+  fixSuggestions = [],
+  checklist = [],
+  escalationPlan = [],
+  splitRecommendation = null,
+}) {
   const fmt = (items, icon) => (items.length ? items.map((f) => `- ${icon} **${f.lens}**: ${f.message}`).join("\n") : "- None");
 
   const reviewersSection = reviewerRouting.enabled
@@ -1365,6 +1475,9 @@ function buildComment({ pr, result, nextSteps, reviewerRouting, requiredCoverage
             `- **${e.level}** owners: ${e.owners.length ? e.owners.join(", ") : "none"}; notify: ${e.notify.length ? e.notify.join(", ") : "none"}${e.message ? `; note: ${e.message}` : ""}`
         )
         .join("\n")}`
+    : "";
+  const splitSection = splitRecommendation
+    ? `### Auto-Split Recommendation\n- Current scope: ${splitRecommendation.changedFiles} files, ${splitRecommendation.changedLines} lines\n- Suggested split boundaries:\n${splitRecommendation.groups.map((g) => `  - ${g.group} (${g.count} files)`).join("\n")}`
     : "";
 
   return `${MARKER}
@@ -1393,6 +1506,8 @@ ${fixSection}
 ${checklistSection}
 
 ${escalationSection}
+
+${splitSection}
 
 ### Findings
 
@@ -1782,6 +1897,10 @@ async function main() {
   const result = runAgentLoop({ pr, files, config, repoSlug });
   const nextSteps = buildNextSteps(result, effectiveThresholds);
   const fixSuggestions = buildFixSuggestions(result, files, config);
+  const splitRecommendation = buildSplitRecommendation(files, pr, config);
+  if (splitRecommendation) {
+    nextSteps.unshift("Split this PR into smaller domain-focused PRs using suggested boundaries.");
+  }
 
   const codeownerRules = loadCodeowners();
   const prAuthor = pr.user?.login || "";
@@ -1804,6 +1923,14 @@ async function main() {
   let currentCoverage = collectCurrentReviewers(pr);
   let requestedViaRequired = false;
   const approvalCount = (reviews || []).filter((r) => String(r.state || "").toUpperCase() === "APPROVED").length;
+  const firstReviewAt = (reviews || [])
+    .map((r) => r.submitted_at)
+    .filter(Boolean)
+    .sort()[0];
+  const firstReviewLatencyHours =
+    pr.created_at && firstReviewAt
+      ? Math.max(0, (new Date(firstReviewAt).getTime() - new Date(pr.created_at).getTime()) / (1000 * 60 * 60))
+      : null;
 
   let missingRequired = computeMissingRequired(required, currentCoverage, prAuthor);
   const shouldRequest = reviewerRoutingFinal.enabled && reviewerRoutingFinal.autoRequest && !mockPr;
@@ -1884,6 +2011,20 @@ async function main() {
     result.findings = dedupeFindings([...result.findings, regression.finding]);
     nextSteps.unshift("Investigate recurring regression signature before merge.");
   }
+  const crossDup = detectCrossPrDuplicates({
+    repoRuns,
+    prNumber: pr.number,
+    signature: regression.signature,
+    config,
+  });
+  if (crossDup.finding) {
+    result.findings = dedupeFindings([...result.findings, crossDup.finding]);
+    nextSteps.unshift("Coordinate with overlapping PRs sharing the same regression signature.");
+  }
+  const policyDrift = detectPolicyDrift({ config, effectiveThresholds });
+  if (policyDrift.finding) {
+    result.findings = dedupeFindings([...result.findings, policyDrift.finding]);
+  }
   result.grouped = summarizeFindings(result.findings);
   const escalationPlan = computeEscalationPlan({ result, config });
   if (escalationPlan.length) {
@@ -1911,6 +2052,7 @@ async function main() {
     fixSuggestions,
     checklist,
     escalationPlan,
+    splitRecommendation,
   });
   const autoRequestAttempted = reviewerRoutingFinal.enabled && reviewerRoutingFinal.autoRequest;
   const approvedByReviewer = (reviews || []).some((r) => String(r.state || "").toUpperCase() === "APPROVED");
@@ -1939,6 +2081,8 @@ async function main() {
     regressionSignature: regression.signature,
     regressionRepeats: regression.repeats + 1,
     escalationPlan,
+    crossPrDuplicates: crossDup.matches,
+    policyDrift,
     promptTracePath: "",
     checklist,
     approvalCount,
@@ -1948,6 +2092,11 @@ async function main() {
       prAgeHours: Number(prAgeHours.toFixed(2)),
       exceeded: Boolean(slaExceeded),
     },
+    reviewerLatency: {
+      firstReviewAt: firstReviewAt || "",
+      firstReviewLatencyHours: firstReviewLatencyHours == null ? null : Number(firstReviewLatencyHours.toFixed(2)),
+    },
+    filesChanged: files.map((f) => String(f.filename || "")),
   };
   const scorecard = writeQualityScorecard({
     repoSlug,
@@ -1994,6 +2143,9 @@ async function main() {
         promptTracePath: historyEntry.promptTracePath,
         checklist,
         escalationPlan,
+        splitRecommendation,
+        crossPrDuplicates: crossDup.matches,
+        policyDrift,
         regressionSignature: regression.signature,
         regressionRepeats: regression.repeats + 1,
         scorecard,

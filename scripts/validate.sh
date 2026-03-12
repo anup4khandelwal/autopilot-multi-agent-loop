@@ -33,6 +33,10 @@ node scripts/build-ownership-report.mjs >/tmp/reviewos-ownership.log
 test -f docs/review-dashboard.csv
 test -f docs/repo-baseline.csv
 test -f docs/review-confidence.csv
+test -f docs/reviewer-latency.csv
+test -f docs/change-risk-heatmap.csv
+test -f docs/change-risk-heatmap.json
+test -f docs/policy-drift.csv
 test -f docs/finding-ownership.csv
 
 echo "[6/6] Render dashboard site..."

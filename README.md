@@ -2,13 +2,13 @@
 
 ReviewOps Copilot for pull requests. `review-os` shifts teams from implementation-heavy flow to structured review across Engineering, Product, Design, and Security.
 
-## Latest Update (v0.1.7)
+## Latest Update (v0.1.8)
 
-- Added reviewer weekly capacity caps on auto-request routing
-- Added adaptive thresholds from rolling repository baseline
-- Added escalation matrix with level-based owner/channel routing
-- Added regression signature detection for repeated warning/critical patterns
-- Added per-PR quality scorecard artifacts with percentile ranking
+- Added cross-PR duplicate detection for shared regression signatures
+- Added auto-split recommendations for oversized PR scope
+- Added reviewer response latency analytics export
+- Added change-risk heatmap export (CSV + JSON)
+- Added policy drift detection from adaptive vs configured thresholds
 
 ## What it does
 
@@ -65,6 +65,9 @@ Use `.reviewos.yml`:
 - `adaptive_thresholds.*` auto-adjust warning thresholds from recent history
 - `escalation.levels.*` level-based escalation policies
 - `regression_signatures.*` detect repeated quality regressions
+- `cross_pr_duplicates.*` detect same signatures across different PRs
+- `auto_split.*` suggest split boundaries for large PRs
+- `policy_drift.*` alert threshold divergence from configured baseline
 - `finding_ownership.default_owner|rules` team mapping for findings
 - `path_overrides` apply path-based penalties and test requirements
 - `alerts.enabled` enable Slack/Discord critical alerts
@@ -123,6 +126,9 @@ Also writes: `docs/finding-ownership.md`
 Also writes: `docs/finding-ownership.csv`
 Also writes: `docs/review-confidence.csv`
 Also writes: `.reviewos/scorecards/*.json|*.md`
+Also writes: `docs/reviewer-latency.csv`
+Also writes: `docs/change-risk-heatmap.csv|json`
+Also writes: `docs/policy-drift.csv`
 
 ## Publish dashboard (Pages)
 
