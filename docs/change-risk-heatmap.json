@@ -1,37 +1,37 @@
 [
   {
     "path": "src/auth",
-    "critical": 26,
-    "warning": 111,
-    "runs": 19,
-    "risk_score": 189
+    "critical": 31,
+    "warning": 136,
+    "runs": 23,
+    "risk_score": 229
   },
   {
     "path": ".github/workflows",
-    "critical": 22,
-    "warning": 94,
-    "runs": 19,
-    "risk_score": 160
-  },
-  {
-    "path": "src/payments",
-    "critical": 8,
-    "warning": 23,
-    "runs": 4,
-    "risk_score": 47
+    "critical": 26,
+    "warning": 115,
+    "runs": 23,
+    "risk_score": 193
   },
   {
     "path": "src/components",
     "critical": 0,
-    "warning": 46,
-    "runs": 8,
-    "risk_score": 46
+    "warning": 58,
+    "runs": 10,
+    "risk_score": 58
+  },
+  {
+    "path": "src/payments",
+    "critical": 8,
+    "warning": 24,
+    "runs": 4,
+    "risk_score": 48
   },
   {
     "path": "src/middleware",
     "critical": 0,
-    "warning": 23,
-    "runs": 4,
-    "risk_score": 23
+    "warning": 29,
+    "runs": 5,
+    "risk_score": 29
   }
 ]

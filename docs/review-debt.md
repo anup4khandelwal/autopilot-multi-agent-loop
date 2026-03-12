@@ -1,12 +1,12 @@
 # Review Debt Ledger
 
-Generated: 2026-03-12T14:03:08.337Z
+Generated: 2026-03-12T14:48:06.591Z
 
 ## Summary
 
 - Open debt items: 28
-- Resolved debt items: 18
-- Ledger updated at: 2026-03-12T14:03:07.949Z
+- Resolved debt items: 22
+- Ledger updated at: 2026-03-12T14:48:06.153Z
 
 ## Open Debt by Owner / Lens / Path
 
@@ -36,7 +36,7 @@ Generated: 2026-03-12T14:03:08.337Z
 | #102 | unassigned | Security | .github/workflows | 0 | Sensitive domain changes detected (1 file(s)). |
 | #102 | unassigned | Security | .github/workflows | 0 | Sensitive changes detected without test updates. |
 | #102 | unassigned | PolicyDrift | root | 0 | Adaptive thresholds drifted beyond ±8 on: product_warning(+15), security_warning(-15). |
-| #102 | unassigned | Regression | root | 0 | Regression signature '0de88c3e46ef1c5f' has appeared 10 times (including this run). |
+| #102 | unassigned | Regression | root | 0 | Regression signature '0de88c3e46ef1c5f' has appeared 11 times (including this run). |
 | #101 | unassigned | Engineering | src/payments | 0 | No test file changes detected. |
 | #101 | unassigned | Design | src/payments | 0 | Frontend changes detected without UI evidence (screenshots/UX notes). |
 | #101 | unassigned | Security | src/payments | 0 | Sensitive domain changes detected (1 file(s)). |
@@ -49,13 +49,13 @@ Generated: 2026-03-12T14:03:08.337Z
 
 | PR | Owner | Lens | Path Group | Cleared At |
 |---|---|---|---|---|
-| #102 | unassigned | Regression | root | 2026-03-12T14:03:07 |
-| #101 | unassigned | PolicyDrift | root | 2026-03-12T14:03:07 |
-| #101 | unassigned | Engineering | src/auth | 2026-03-12T14:03:07 |
-| #101 | unassigned | Design | src/auth | 2026-03-12T14:03:07 |
-| #101 | unassigned | Security | src/auth | 2026-03-12T14:03:07 |
-| #101 | unassigned | Security | src/auth | 2026-03-12T14:03:07 |
-| #101 | unassigned | PathPolicy | src/auth | 2026-03-12T14:03:07 |
-| #101 | unassigned | Regression | root | 2026-03-12T14:03:07 |
-| #101 | unassigned | Engineering | .github/workflows | 2026-03-12T14:03:07 |
-| #101 | unassigned | Security | .github/workflows | 2026-03-12T14:03:07 |
+| #101 | unassigned | PolicyDrift | root | 2026-03-12T14:48:06 |
+| #101 | unassigned | Engineering | src/auth | 2026-03-12T14:48:06 |
+| #101 | unassigned | Design | src/auth | 2026-03-12T14:48:06 |
+| #101 | unassigned | Security | src/auth | 2026-03-12T14:48:06 |
+| #101 | unassigned | Security | src/auth | 2026-03-12T14:48:06 |
+| #101 | unassigned | PathPolicy | src/auth | 2026-03-12T14:48:06 |
+| #101 | unassigned | Regression | root | 2026-03-12T14:48:06 |
+| #101 | unassigned | Engineering | .github/workflows | 2026-03-12T14:48:05 |
+| #101 | unassigned | Security | .github/workflows | 2026-03-12T14:48:05 |
+| #101 | unassigned | Security | .github/workflows | 2026-03-12T14:48:05 |

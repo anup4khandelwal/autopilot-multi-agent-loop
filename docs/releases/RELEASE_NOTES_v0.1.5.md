@@ -13,4 +13,3 @@
 - Tune `reviewer_sla.threshold_hours` and `reviewer_sla.cooldown_hours` in `.reviewos.yml`.
 - Keep `prompt_trace.enabled: true` for auditability and debugability.
 - Release gate runs in `review-os` workflow via `node src/release-gate.mjs`.
-

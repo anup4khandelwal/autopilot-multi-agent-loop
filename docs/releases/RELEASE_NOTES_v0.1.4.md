@@ -16,4 +16,3 @@
 - Ensure labels exist in your repo if label automation is enabled.
 - `review-os` workflow now requests `security-events: write` to upload SARIF.
 - Keep `reviewer_routing.risk_based: true` for priority reviewer ranking.
-

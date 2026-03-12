@@ -16,4 +16,3 @@
 - Set `policy_preset` in `.reviewos.yml` (or `REVIEW_OS_POLICY_PRESET`) to apply a baseline.
 - If using governance policy lock, provide `governance.expected_sha256` or env `REVIEW_OS_POLICY_SHA256`.
 - If using signatures, set `governance.signature` and env secret `REVIEW_OS_SIGNATURE_SECRET`.
-

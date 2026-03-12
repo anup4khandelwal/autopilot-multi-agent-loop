@@ -16,4 +16,3 @@
 - Start with `adaptive_thresholds.blend: 0.5` and adjust after a week of runs.
 - Define escalation level rules for your incident process.
 - Use scorecard artifacts in PR checks or release governance.
-

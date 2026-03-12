@@ -1,6 +1,6 @@
 # Executive Weekly Digest
 
-Generated: 2026-03-12T14:03:08.446Z
+Generated: 2026-03-12T14:48:06.693Z
 Window ending: 2026-03-12
 
 ## Executive Summary
@@ -31,7 +31,7 @@ No data yet.
 - **Security** (39): Sensitive changes detected without test updates.
 - **Security** (33): Sensitive domain changes detected (1 file(s)).
 - **Design** (30): Frontend changes detected without UI evidence (screenshots/UX notes).
-- **PolicyDrift** (20): Adaptive thresholds drifted beyond ±8 on: product_warning(+15), security_warning(-15).
+- **PolicyDrift** (23): Adaptive thresholds drifted beyond ±8 on: product_warning(+15), security_warning(-15).
 
 ## Slack-ready Summary
 
