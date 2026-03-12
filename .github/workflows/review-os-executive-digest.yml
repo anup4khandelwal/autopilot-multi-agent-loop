@@ -1,0 +1,40 @@
+name: review-os-executive-digest
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 5 * * 1"
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  build-digest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build reviewer queue
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: node scripts/build-reviewer-queue.mjs
+
+      - name: Build debt ledger
+        run: node scripts/build-debt-ledger.mjs
+
+      - name: Build executive digest
+        run: node scripts/build-executive-digest.mjs
+
+      - name: Upload digest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: reviewos-executive-digest-${{ github.run_id }}
+          path: |
+            docs/executive-weekly-digest.md
+            docs/reviewer-queue.md
+            docs/reviewer-queue.csv
+            docs/review-debt.md
+            docs/review-debt.csv

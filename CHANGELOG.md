@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.1.10
+
+- Added reviewer fairness scoring to spread routing more equitably over time
+- Added PR archetype classification with config-driven archetype policy overrides
+- Added persistent review debt ledger output (`docs/review-debt.md`, `docs/review-debt.csv`)
+- Added risk simulation mode for alternate policy/routing outcomes without mutating PR state
+- Added executive weekly digest output (`docs/executive-weekly-digest.md`)
+
 ## v0.1.9
 
 - Added live reviewer queue board exports (`docs/reviewer-queue.md`, `docs/reviewer-queue.csv`)

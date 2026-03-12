@@ -8,6 +8,7 @@ const HISTORY_DIR = ".reviewos/history";
 const REPORT_PATH = ".reviewos/last-report.json";
 const TRACE_DIR = ".reviewos/traces";
 const SCORECARD_DIR = ".reviewos/scorecards";
+const DEBT_LEDGER_PATH = ".reviewos/review-debt.json";
 
 function clamp(v, min = 0, max = 100) {
   return Math.max(min, Math.min(max, v));
@@ -56,6 +57,10 @@ function deepMerge(base, ext) {
     }
   }
   return out;
+}
+
+function cloneJson(value) {
+  return JSON.parse(JSON.stringify(value));
 }
 
 const POLICY_PRESETS = {
@@ -129,6 +134,8 @@ function loadConfig(configPath = ".reviewos.yml") {
       load_balance_weight: 0.6,
       weekly_capacity_per_user: 10,
       weekly_capacity_per_team: 20,
+      fairness_enabled: true,
+      fairness_weight: 0.35,
     },
     labels: {
       enabled: false,
@@ -211,6 +218,15 @@ function loadConfig(configPath = ".reviewos.yml") {
       end_hour: 18,
       high_risk_security_threshold: 78,
     },
+    archetypes: {
+      enabled: true,
+      default: "chore",
+      overrides: {},
+    },
+    debt_ledger: {
+      enabled: true,
+      file: DEBT_LEDGER_PATH,
+    },
     finding_ownership: {
       default_owner: "unassigned",
       rules: {},
@@ -262,6 +278,8 @@ function loadConfig(configPath = ".reviewos.yml") {
     policy_drift: { ...defaults.policy_drift },
     context_budget: { ...defaults.context_budget },
     merge_window: { ...defaults.merge_window },
+    archetypes: { ...defaults.archetypes, overrides: { ...(defaults.archetypes?.overrides || {}) } },
+    debt_ledger: { ...defaults.debt_ledger },
     alerts: { ...defaults.alerts },
     prompt_trace: { ...defaults.prompt_trace },
     release_gate: { ...defaults.release_gate },
@@ -475,7 +493,123 @@ function scoreSecurity(files, engineering) {
     findings.push({ severity: "critical", lens: "Security", message: "Sensitive changes detected without test updates." });
   }
 
-  return { score: clamp(score), findings, trace };
+  return { score: clamp(score), findings, trace, sensitiveCount: sensitive.length };
+}
+
+function classifyPrArchetype(pr, files, config) {
+  const fallback = String(config.archetypes?.default || "chore");
+  if (config.archetypes?.enabled === false) {
+    return { name: fallback, confidence: 0, signals: ["archetype classification disabled"], appliedOverride: null };
+  }
+
+  const title = String(pr.title || "").toLowerCase();
+  const labels = (Array.isArray(pr.labels) ? pr.labels : [])
+    .map((label) => String(label?.name || label || "").toLowerCase())
+    .filter(Boolean);
+  const fileNames = files.map((f) => String(f.filename || "").toLowerCase()).filter(Boolean);
+  const changedFiles = fileNames.length;
+  const docsOnly =
+    changedFiles > 0 &&
+    fileNames.every(
+      (name) =>
+        name.startsWith("docs/") ||
+        name.endsWith(".md") ||
+        /(^|\/)(readme|changelog|contributing|license)(\.md)?$/i.test(name)
+    );
+  const docsCount = fileNames.filter((name) => docsOnly || name.startsWith("docs/") || name.endsWith(".md")).length;
+  const infraCount = fileNames.filter((name) => /(^|\/)(dockerfile|docker-compose|terraform|helm|k8s|infra|ops)\b|^\.github\/workflows\//i.test(name)).length;
+  const frontendCount = fileNames.filter((name) => /\.(tsx|jsx|css|scss|vue)$/.test(name) || /(^|\/)(ui|components|pages|app|web|frontend)\//.test(name)).length;
+  const docsRatio = changedFiles ? docsCount / changedFiles : 0;
+  const infraRatio = changedFiles ? infraCount / changedFiles : 0;
+
+  const signals = [];
+  let name = fallback;
+
+  if (docsOnly) {
+    name = "docs";
+    signals.push("docs_only_files");
+  } else if (
+    /^release[:\s]|^chore\(release\):/.test(title) ||
+    /\brelease\b|\bbump version\b/.test(title) ||
+    labels.some((label) => /release/.test(label))
+  ) {
+    name = "release";
+    signals.push("release_title_or_label");
+  } else if (infraRatio >= 0.5 || labels.some((label) => /infra|devops|ops|ci/.test(label))) {
+    name = "infra";
+    signals.push("infra_heavy_diff");
+  } else if (/\bfix\b|\bbug\b|\bhotfix\b|\bregression\b|\bpatch\b/.test(title) || labels.some((label) => /bug|fix|hotfix/.test(label))) {
+    name = "bugfix";
+    signals.push("bugfix_title_or_label");
+  } else if (
+    /\brefactor\b|\bcleanup\b|\brestructure\b|\bextract\b|\bsimplify\b|\brename\b/.test(title) ||
+    labels.some((label) => /refactor|cleanup/.test(label))
+  ) {
+    name = "refactor";
+    signals.push("refactor_title_or_label");
+  } else if (
+    /\bfeat\b|\bfeature\b|\badd\b|\bimplement\b|\bintroduce\b|\blaunch\b/.test(title) ||
+    labels.some((label) => /feature|enhancement/.test(label))
+  ) {
+    name = "feature";
+    signals.push("feature_title_or_label");
+  } else if (docsRatio >= 0.7) {
+    name = "docs";
+    signals.push("docs_dominant");
+  }
+
+  if (frontendCount > 0) signals.push("frontend_touched");
+  if (infraCount > 0) signals.push("infra_touched");
+  if (docsCount > 0) signals.push("docs_touched");
+
+  const confidence = Number(Math.min(0.98, 0.52 + signals.length * 0.1 + (docsOnly ? 0.15 : 0)).toFixed(2));
+  return { name, confidence, signals, appliedOverride: null };
+}
+
+function applyArchetypeOverride(config, archetype) {
+  const override = config.archetypes?.overrides?.[archetype.name];
+  if (!override || typeof override !== "object") {
+    return {
+      config,
+      archetype: { ...archetype, appliedOverride: null },
+    };
+  }
+
+  const next = cloneJson(config);
+  const thresholdDeltas = {};
+  const thresholdKeys = {
+    engineering_warning_delta: "engineering_warning",
+    product_warning_delta: "product_warning",
+    design_warning_delta: "design_warning",
+    security_warning_delta: "security_warning",
+  };
+
+  if (override.max_iterations !== undefined) next.max_iterations = Math.max(1, Number(override.max_iterations || next.max_iterations || 3));
+  if (override.fail_on_critical !== undefined) next.fail_on_critical = Boolean(override.fail_on_critical);
+
+  for (const [deltaKey, thresholdKey] of Object.entries(thresholdKeys)) {
+    if (override[deltaKey] === undefined) continue;
+    const delta = Number(override[deltaKey] || 0);
+    next.thresholds[thresholdKey] = clamp(Number(next.thresholds?.[thresholdKey] || 75) + delta, 1, 99);
+    thresholdDeltas[thresholdKey] = delta;
+  }
+
+  for (const thresholdKey of Object.values(thresholdKeys)) {
+    if (override[thresholdKey] === undefined) continue;
+    next.thresholds[thresholdKey] = clamp(Number(override[thresholdKey] || next.thresholds?.[thresholdKey] || 75), 1, 99);
+  }
+
+  return {
+    config: next,
+    archetype: {
+      ...archetype,
+      appliedOverride: {
+        maxIterations: override.max_iterations === undefined ? null : next.max_iterations,
+        failOnCritical: override.fail_on_critical === undefined ? null : next.fail_on_critical,
+        thresholdDeltas,
+      },
+    },
+  };
 }
 
 function dedupeFindings(findings) {
@@ -890,6 +1024,34 @@ function weeklyCount(rec, nowTs) {
   return Number(rec.weekly_count || 0);
 }
 
+function computeFairnessModel(loadMap, candidates) {
+  const universe = [...new Set([...(candidates || []), ...Object.keys(loadMap || {})])];
+  const counts = universe.map((id) => Number(loadMap?.[id]?.count || 0)).filter((value) => Number.isFinite(value));
+  if (!counts.length) return { min: 0, max: 0, mean: 0 };
+  return {
+    min: Math.min(...counts),
+    max: Math.max(...counts),
+    mean: avg(counts),
+  };
+}
+
+function computeFairnessScore(id, loadMap, model) {
+  const count = Number(loadMap?.[id]?.count || 0);
+  if (!Number.isFinite(model.max) || model.max <= model.min) {
+    return {
+      score: 50,
+      totalCount: count,
+      deltaFromMean: Number((count - Number(model.mean || 0)).toFixed(2)),
+    };
+  }
+  const ratio = (count - model.min) / Math.max(1, model.max - model.min);
+  return {
+    score: Math.round(clamp(100 - ratio * 100, 0, 100)),
+    totalCount: count,
+    deltaFromMean: Number((count - Number(model.mean || 0)).toFixed(2)),
+  };
+}
+
 function applyCapacityCaps(candidates, loadMap, weeklyCap, nowTs) {
   if (!Number.isFinite(weeklyCap) || weeklyCap <= 0) return { kept: candidates, cappedOut: [] };
   const kept = [];
@@ -912,22 +1074,39 @@ function pickLoadBalancedWithCaps({
   nowTs,
   decayDays,
   weeklyCap,
+  fairnessEnabled,
+  fairnessWeight,
 }) {
+  const fairnessModel = computeFairnessModel(loadMap, candidates);
   const ranked = candidates
     .map((id) => {
       const base = Number(scoreMap[id] || 0);
       const rec = loadMap[id] || { count: 0, updated_at: "" };
       const daysSince = rec.updated_at ? (nowTs - new Date(rec.updated_at).getTime()) / (1000 * 60 * 60 * 24) : 999;
       const decayed = decayLoadCounter(Number(rec.count || 0), daysSince, decayDays);
-      const finalScore = base - weight * decayed;
-      return { id, base, decayed, finalScore };
+      const fairness = fairnessEnabled ? computeFairnessScore(id, loadMap, fairnessModel) : { score: 50, totalCount: Number(rec.count || 0), deltaFromMean: 0 };
+      const fairnessAdjustment = fairnessEnabled ? ((fairness.score - 50) / 50) * fairnessWeight : 0;
+      const finalScore = base - weight * decayed + fairnessAdjustment;
+      return {
+        id,
+        base,
+        decayed,
+        finalScore,
+        fairnessScore: fairness.score,
+        fairnessAdjustment,
+        totalCount: fairness.totalCount,
+        deltaFromMean: fairness.deltaFromMean,
+      };
     })
     .sort((a, b) => b.finalScore - a.finalScore || a.id.localeCompare(b.id));
   const rankedIds = ranked.map((r) => r.id);
   const caps = applyCapacityCaps(rankedIds, loadMap, weeklyCap, nowTs);
+  const pickedRanked = caps.kept.slice(0, cap).map((id) => ranked.find((r) => r.id === id)).filter(Boolean);
   return {
     picked: caps.kept.slice(0, cap),
+    pickedRanked,
     cappedOut: caps.cappedOut,
+    ranked,
   };
 }
 
@@ -940,6 +1119,8 @@ function applyReviewerLoadBalancing(routing, config) {
   const decayDays = Math.max(1, Number(config.reviewer_routing?.load_balance_decay_days || 14));
   const userWeeklyCap = Number(config.reviewer_routing?.weekly_capacity_per_user || 10);
   const teamWeeklyCap = Number(config.reviewer_routing?.weekly_capacity_per_team || 20);
+  const fairnessEnabled = Boolean(config.reviewer_routing?.fairness_enabled);
+  const fairnessWeight = Math.max(0, Number(config.reviewer_routing?.fairness_weight || 0.35));
   const nowTs = Date.now();
 
   const userPick = pickLoadBalancedWithCaps({
@@ -951,6 +1132,8 @@ function applyReviewerLoadBalancing(routing, config) {
     nowTs,
     decayDays,
     weeklyCap: userWeeklyCap,
+    fairnessEnabled,
+    fairnessWeight,
   });
   const teamPick = pickLoadBalancedWithCaps({
     candidates: routing.teams,
@@ -961,6 +1144,8 @@ function applyReviewerLoadBalancing(routing, config) {
     nowTs,
     decayDays,
     weeklyCap: teamWeeklyCap,
+    fairnessEnabled,
+    fairnessWeight,
   });
 
   return {
@@ -974,8 +1159,14 @@ function applyReviewerLoadBalancing(routing, config) {
       weight,
       userWeeklyCap,
       teamWeeklyCap,
+      fairnessEnabled,
+      fairnessWeight,
       cappedUsers: userPick.cappedOut,
       cappedTeams: teamPick.cappedOut,
+    },
+    fairness: {
+      users: Object.fromEntries(userPick.ranked.map((row) => [row.id, { score: row.fairnessScore, totalCount: row.totalCount, deltaFromMean: row.deltaFromMean }])),
+      teams: Object.fromEntries(teamPick.ranked.map((row) => [row.id, { score: row.fairnessScore, totalCount: row.totalCount, deltaFromMean: row.deltaFromMean }])),
     },
   };
 }
@@ -1152,8 +1343,22 @@ function resolveFindingOwner(finding, files, config) {
   return String(ownership.default_owner || "unassigned");
 }
 
+function dominantPathGroup(files) {
+  const counts = new Map();
+  for (const file of files || []) {
+    const group = topPathGroup(file.filename);
+    counts.set(group, (counts.get(group) || 0) + 1);
+  }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0] || "root";
+}
+
 function applyFindingOwnership(findings, files, config) {
-  return findings.map((f) => ({ ...f, owner: resolveFindingOwner(f, files, config) }));
+  const primaryPathGroup = dominantPathGroup(files);
+  return findings.map((f) => ({
+    ...f,
+    owner: resolveFindingOwner(f, files, config),
+    pathGroup: primaryPathGroup,
+  }));
 }
 
 function buildPreMergeChecklist({ result, files, requiredCoverage, config, approvalCount }) {
@@ -1365,6 +1570,131 @@ function topPathGroup(filePath) {
   return parts[0] || "root";
 }
 
+function loadDebtLedger(filePath) {
+  if (!fs.existsSync(filePath)) return { updatedAt: "", entries: [] };
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    return {
+      updatedAt: String(parsed.updatedAt || ""),
+      entries: Array.isArray(parsed.entries) ? parsed.entries : [],
+    };
+  } catch {
+    return { updatedAt: "", entries: [] };
+  }
+}
+
+function debtEntryKey(repoSlug, prNumber, finding) {
+  return `${repoSlug}|${prNumber}|${finding.severity || "warning"}|${finding.lens || "unknown"}|${finding.owner || "unassigned"}|${finding.pathGroup || "root"}|${finding.message || ""}`;
+}
+
+function updateReviewDebtLedger({ config, repoSlug, pr, result, archetype, timestamp }) {
+  if (!config.debt_ledger?.enabled) {
+    return {
+      path: String(config.debt_ledger?.file || DEBT_LEDGER_PATH),
+      newCount: 0,
+      resolvedCount: 0,
+      openCount: 0,
+      topGroups: [],
+    };
+  }
+
+  const filePath = String(config.debt_ledger?.file || DEBT_LEDGER_PATH);
+  ensureDir(path.dirname(filePath));
+  const ledger = loadDebtLedger(filePath);
+  const entries = Array.isArray(ledger.entries) ? ledger.entries : [];
+  const currentFindings = (result.findings || [])
+    .filter((finding) => finding.severity === "critical" || finding.severity === "warning")
+    .map((finding) => ({
+      ...finding,
+      debtKey: debtEntryKey(repoSlug, pr.number, finding),
+    }));
+  const currentKeys = new Set(currentFindings.map((finding) => finding.debtKey));
+  let newCount = 0;
+  let resolvedCount = 0;
+
+  for (const entry of entries) {
+    if (entry.repository !== repoSlug || Number(entry.pr) !== Number(pr.number) || entry.status !== "open") continue;
+    if (!currentKeys.has(entry.key)) {
+      entry.status = "cleared";
+      entry.clearedAt = timestamp;
+      entry.lastSeenAt = timestamp;
+      resolvedCount += 1;
+    }
+  }
+
+  for (const finding of currentFindings) {
+    let entry = entries.find((candidate) => candidate.key === finding.debtKey);
+    if (!entry) {
+      entry = {
+        key: finding.debtKey,
+        repository: repoSlug,
+        pr: pr.number,
+        title: pr.title,
+        severity: finding.severity,
+        lens: finding.lens,
+        owner: finding.owner || "unassigned",
+        pathGroup: finding.pathGroup || "root",
+        message: finding.message,
+        status: "open",
+        firstSeenAt: timestamp,
+        lastSeenAt: timestamp,
+        clearedAt: "",
+        seenCount: 1,
+        reopenedCount: 0,
+        archetype: archetype?.name || "",
+        mergeReadiness: result.mergeReadiness,
+      };
+      entries.push(entry);
+      newCount += 1;
+      continue;
+    }
+
+    if (entry.status !== "open") {
+      entry.status = "open";
+      entry.clearedAt = "";
+      entry.reopenedCount = Number(entry.reopenedCount || 0) + 1;
+      newCount += 1;
+    }
+    entry.title = pr.title;
+    entry.severity = finding.severity;
+    entry.lens = finding.lens;
+    entry.owner = finding.owner || "unassigned";
+    entry.pathGroup = finding.pathGroup || "root";
+    entry.message = finding.message;
+    entry.lastSeenAt = timestamp;
+    entry.seenCount = Number(entry.seenCount || 0) + 1;
+    entry.archetype = archetype?.name || entry.archetype || "";
+    entry.mergeReadiness = result.mergeReadiness;
+  }
+
+  const openEntries = entries.filter((entry) => entry.status === "open");
+  const grouped = new Map();
+  for (const entry of openEntries) {
+    const key = `${entry.owner}|${entry.lens}|${entry.pathGroup}`;
+    grouped.set(key, (grouped.get(key) || 0) + 1);
+  }
+  const topGroups = [...grouped.entries()]
+    .map(([key, count]) => {
+      const [owner, lens, pathGroup] = key.split("|");
+      return { owner, lens, pathGroup, count };
+    })
+    .sort((a, b) => b.count - a.count || a.owner.localeCompare(b.owner))
+    .slice(0, 5);
+
+  const payload = {
+    updatedAt: timestamp,
+    entries,
+  };
+  fs.writeFileSync(filePath, JSON.stringify(payload, null, 2));
+  return {
+    path: filePath,
+    newCount,
+    resolvedCount,
+    openCount: openEntries.length,
+    topGroups,
+  };
+}
+
 function buildSplitRecommendation(files, pr, config) {
   if (!config.auto_split?.enabled) return null;
   const maxFiles = Math.max(1, Number(config.auto_split.max_files || 20));
@@ -1555,6 +1885,151 @@ function evaluateMergeWindow({ config, result, effectiveThresholds, matchedRules
   };
 }
 
+function envFlag(name) {
+  return ["1", "true", "yes", "on"].includes(String(process.env[name] || "").trim().toLowerCase());
+}
+
+function applySimulationRiskProfile(config, profile) {
+  const next = cloneJson(config);
+  const thresholdKeys = ["engineering_warning", "product_warning", "design_warning", "security_warning"];
+
+  if (profile === "high") {
+    next.incident_safe = { ...(next.incident_safe || {}), enabled: true };
+    next.merge_window = { ...(next.merge_window || {}), enabled: true };
+    next.fail_on_critical = true;
+    next.max_iterations = Math.max(3, Number(next.max_iterations || 3));
+    next.reviewer_routing = { ...(next.reviewer_routing || {}), risk_based: true, max_reviewers: Math.max(3, Number(next.reviewer_routing?.max_reviewers || 3)) };
+    for (const key of thresholdKeys) {
+      next.thresholds[key] = clamp(Number(next.thresholds?.[key] || 75) + 5, 1, 99);
+    }
+  } else if (profile === "low") {
+    next.incident_safe = { ...(next.incident_safe || {}), enabled: false };
+    next.merge_window = { ...(next.merge_window || {}), enabled: false };
+    for (const key of thresholdKeys) {
+      next.thresholds[key] = clamp(Number(next.thresholds?.[key] || 75) - 5, 1, 99);
+    }
+  }
+
+  return next;
+}
+
+function loadSimulationConfig(baseConfig) {
+  if (!envFlag("REVIEW_OS_SIMULATION")) return null;
+  let simulationConfig = cloneJson(baseConfig);
+  let source = "current-config";
+
+  const configPath = String(process.env.REVIEW_OS_SIMULATION_CONFIG || "").trim();
+  if (configPath) {
+    simulationConfig = deepMerge(simulationConfig, loadConfig(configPath));
+    source = configPath;
+  }
+
+  const preset = String(process.env.REVIEW_OS_SIMULATION_PRESET || "").trim().toLowerCase();
+  if (preset && POLICY_PRESETS[preset]) {
+    simulationConfig = deepMerge(simulationConfig, POLICY_PRESETS[preset]);
+    source = source === "current-config" ? `preset:${preset}` : `${source}+preset:${preset}`;
+  }
+
+  const profile = String(process.env.REVIEW_OS_SIMULATION_PROFILE || "").trim().toLowerCase();
+  if (profile) {
+    simulationConfig = applySimulationRiskProfile(simulationConfig, profile);
+  }
+
+  return {
+    config: simulationConfig,
+    source,
+    preset: preset || "",
+    profile: profile || "",
+    simulationOnly: envFlag("REVIEW_OS_SIMULATION_ONLY"),
+  };
+}
+
+function runRiskSimulation({
+  pr,
+  files,
+  repoSlug,
+  repoRuns,
+  baseConfig,
+  currentCoverage,
+  codeownerRules,
+  prAuthor,
+  baseResult,
+  baseRouting,
+}) {
+  const simulationInput = loadSimulationConfig(baseConfig);
+  if (!simulationInput) return null;
+
+  const config = simulationInput.config;
+  const effectiveThresholds = computeAdaptiveThresholds(config, repoRuns);
+  const result = runAgentLoop({ pr, files, config, repoSlug });
+  const required = result.requiredReviewers || { users: [], teams: [] };
+  const missing = computeMissingRequired(required, currentCoverage, prAuthor);
+  if (missing.users.length || missing.teams.length) {
+    result.findings = dedupeFindings([
+      ...result.findings,
+      {
+        severity: "critical",
+        lens: "ReviewerPolicy",
+        message: `Missing required reviewer coverage. Users: ${missing.users.join(",") || "none"}; Teams: ${missing.teams.join(",") || "none"}.`,
+      },
+    ]);
+    result.scores.security = clamp(result.scores.security - 10);
+    result.mergeReadiness = Math.round(
+      result.scores.engineering * Number(config.weights.engineering) +
+        result.scores.product * Number(config.weights.product) +
+        result.scores.design * Number(config.weights.design) +
+        result.scores.security * Number(config.weights.security)
+    );
+    result.grouped = summarizeFindings(result.findings);
+  }
+
+  const routingSeed = {
+    enabled: Boolean(config.reviewer_routing?.enabled),
+    autoRequest: Boolean(config.reviewer_routing?.auto_request),
+    riskBased: Boolean(config.reviewer_routing?.risk_based),
+    ...resolveReviewers(files, prAuthor, codeownerRules, {
+      maxReviewers: Number(config.reviewer_routing?.max_reviewers) || 3,
+      riskBased: Boolean(config.reviewer_routing?.risk_based),
+    }),
+  };
+  const reviewerRouting = applyReviewerLoadBalancing(routingSeed, config);
+  const mergeWindow = evaluateMergeWindow({
+    config,
+    result,
+    effectiveThresholds,
+    matchedRules: result.matchedPathRules || [],
+  });
+  const blocked = Boolean((config.fail_on_critical && result.grouped.critical.length > 0) || mergeWindow.blocked);
+
+  return {
+    enabled: true,
+    simulationOnly: simulationInput.simulationOnly,
+    source: simulationInput.source,
+    preset: simulationInput.preset,
+    profile: simulationInput.profile,
+    mergeReadiness: result.mergeReadiness,
+    delta: result.mergeReadiness - Number(baseResult?.mergeReadiness || 0),
+    critical: result.grouped.critical.length,
+    warning: result.grouped.warning.length,
+    blocked,
+    blockReasons: [
+      config.fail_on_critical && result.grouped.critical.length > 0 ? "critical-findings" : "",
+      mergeWindow.blocked ? "merge-window" : "",
+    ].filter(Boolean),
+    effectiveThresholds,
+    reviewerRouting: {
+      users: reviewerRouting.users,
+      teams: reviewerRouting.teams,
+      addedUsers: reviewerRouting.users.filter((user) => !(baseRouting?.users || []).includes(user)),
+      removedUsers: (baseRouting?.users || []).filter((user) => !reviewerRouting.users.includes(user)),
+      addedTeams: reviewerRouting.teams.filter((team) => !(baseRouting?.teams || []).includes(team)),
+      removedTeams: (baseRouting?.teams || []).filter((team) => !reviewerRouting.teams.includes(team)),
+    },
+    mergeWindow,
+    nextSteps: buildNextSteps(result, effectiveThresholds).slice(0, 4),
+  };
+}
+
 function buildNextSteps(result, thresholds) {
   const nextSteps = [];
   const { grouped, scores } = result;
@@ -1574,6 +2049,7 @@ function buildComment({
   pr,
   result,
   nextSteps,
+  archetype = null,
   reviewerRouting,
   requiredCoverage,
   fixSuggestions = [],
@@ -1583,6 +2059,8 @@ function buildComment({
   ownerSla = null,
   contextBudget = null,
   mergeWindow = null,
+  debtLedger = null,
+  simulation = null,
 }) {
   const fmt = (items, icon) => (items.length ? items.map((f) => `- ${icon} **${f.lens}**: ${f.message}`).join("\n") : "- None");
 
@@ -1623,6 +2101,21 @@ function buildComment({
   const mergeWindowSection = mergeWindow?.highRisk
     ? `### Merge Window Policy\n- High risk: Yes\n- Blocked now: ${mergeWindow.blocked ? "Yes" : "No"}\n- Rule: ${mergeWindow.reason || `Current window allowed in ${mergeWindow.clock?.timeZone || "UTC"}.`}`
     : "";
+  const archetypeSection = archetype
+    ? `### PR Archetype\n- Type: ${archetype.name}\n- Confidence: ${(Number(archetype.confidence || 0) * 100).toFixed(0)}%\n- Signals: ${archetype.signals?.join(", ") || "none"}${
+        archetype.appliedOverride?.thresholdDeltas && Object.keys(archetype.appliedOverride.thresholdDeltas).length
+          ? `\n- Policy override deltas: ${Object.entries(archetype.appliedOverride.thresholdDeltas)
+              .map(([key, value]) => `${key}=${value > 0 ? "+" : ""}${value}`)
+              .join(", ")}`
+          : ""
+      }`
+    : "";
+  const debtSection = debtLedger
+    ? `### Review Debt Ledger\n- Open debt items: ${debtLedger.openCount}\n- New this run: ${debtLedger.newCount}\n- Resolved this run: ${debtLedger.resolvedCount}`
+    : "";
+  const simulationSection = simulation?.enabled
+    ? `### Risk Simulation\n- Source: ${simulation.source}${simulation.preset ? ` (preset: ${simulation.preset})` : ""}${simulation.profile ? ` (profile: ${simulation.profile})` : ""}\n- Merge readiness: ${simulation.mergeReadiness}/100 (${simulation.delta >= 0 ? "+" : ""}${simulation.delta})\n- Critical findings: ${simulation.critical}; warnings: ${simulation.warning}\n- Blocked: ${simulation.blocked ? `Yes (${simulation.blockReasons.join(", ") || "policy"})` : "No"}\n- Reviewer changes: users +[${simulation.reviewerRouting.addedUsers.join(", ") || "none"}] -[${simulation.reviewerRouting.removedUsers.join(", ") || "none"}]; teams +[${simulation.reviewerRouting.addedTeams.join(", ") || "none"}] -[${simulation.reviewerRouting.removedTeams.join(", ") || "none"}]`
+    : "";
 
   return `${MARKER}
 <!-- review-os:sla threshold=${ownerSla?.thresholdHours || ""} cooldown=${ownerSla?.cooldownHours || ""} escalation=${ownerSla?.escalationAfterHours || ""} owners=${(ownerSla?.owners || []).join(",")} -->
@@ -1639,6 +2132,8 @@ function buildComment({
 | Product | ${result.scores.product} |
 | Design | ${result.scores.design} |
 | Security | ${result.scores.security} |
+
+${archetypeSection}
 
 ${reviewersSection}
 
@@ -1659,6 +2154,10 @@ ${escalationSection}
 ${splitSection}
 
 ${mergeWindowSection}
+
+${debtSection}
+
+${simulationSection}
 
 ### Findings
 
@@ -1800,7 +2299,7 @@ function writeSarifReport(repoSlug, pr, result) {
         tool: {
           driver: {
             name: "review-os",
-            version: "0.1.9",
+            version: "0.1.10",
             informationUri: "https://github.com/anup4khandelwal/autopilot-multi-agent-loop",
             rules: findings.map((f, idx) => ({
               id: `reviewos-${idx + 1}`,
@@ -1929,6 +2428,7 @@ function writeStepSummary({
   pr,
   result,
   nextSteps,
+  archetype = null,
   reviewerRouting,
   requiredCoverage,
   matchedRules,
@@ -1939,6 +2439,8 @@ function writeStepSummary({
   ownerSla = null,
   contextBudget = null,
   mergeWindow = null,
+  debtLedger = null,
+  simulation = null,
 }) {
   const summaryPath = process.env.GITHUB_STEP_SUMMARY;
   if (!summaryPath) return;
@@ -1949,6 +2451,7 @@ function writeStepSummary({
     `- PR: #${pr.number} ${pr.title}`,
     `- Merge readiness: **${result.mergeReadiness}/100**`,
     `- Loop iterations: ${result.iteration}`,
+    `- PR archetype: ${archetype ? `${archetype.name} (${Math.round(Number(archetype.confidence || 0) * 100)}%)` : "n/a"}`,
     "",
     "| Lens | Score |",
     "|---|---:|",
@@ -1976,6 +2479,12 @@ function writeStepSummary({
     `- SLA threshold: ${ownerSla?.thresholdHours ?? "n/a"}h; escalation after: ${ownerSla?.escalationAfterHours ?? "n/a"}h`,
     `- Context budget: ${contextBudget ? `${contextBudget.estimatedTokens} tokens (${contextBudget.level})` : "n/a"}`,
     `- Merge window blocked: ${mergeWindow?.blocked ? "yes" : "no"}`,
+    `- Debt ledger: ${debtLedger ? `open=${debtLedger.openCount}, new=${debtLedger.newCount}, resolved=${debtLedger.resolvedCount}` : "n/a"}`,
+    `- Simulation: ${
+      simulation?.enabled
+        ? `${simulation.source}${simulation.profile ? ` (${simulation.profile})` : ""}; readiness=${simulation.mergeReadiness}; blocked=${simulation.blocked ? "yes" : "no"}`
+        : "disabled"
+    }`,
     "",
     "### Next Steps",
     ...nextSteps.map((s) => `- ${s}`),
@@ -2015,11 +2524,8 @@ async function main() {
   const repoSlug = process.env.GITHUB_REPOSITORY || "local/review-os";
   const token = process.env.GITHUB_TOKEN;
   const configPath = process.env.REVIEW_OS_CONFIG || ".reviewos.yml";
-  const config = loadConfig(configPath);
-  if (fs.existsSync(configPath)) verifyConfigGovernance(configPath, config);
-
-  const failOnCriticalEnv = process.env.FAIL_ON_CRITICAL;
-  const failOnCritical = failOnCriticalEnv ? failOnCriticalEnv.toLowerCase() === "true" : Boolean(config.fail_on_critical);
+  const loadedConfig = loadConfig(configPath);
+  if (fs.existsSync(configPath)) verifyConfigGovernance(configPath, loadedConfig);
 
   const mockPr = readMock("MOCK_PR_PATH");
   const mockFiles = readMock("MOCK_FILES_PATH");
@@ -2049,6 +2555,10 @@ async function main() {
     reviews = await getPullReviews(owner, repo, pull.number, token);
   }
 
+  const archetypeSeed = classifyPrArchetype(pr, files, loadedConfig);
+  const { config, archetype } = applyArchetypeOverride(loadedConfig, archetypeSeed);
+  const failOnCriticalEnv = process.env.FAIL_ON_CRITICAL;
+  const failOnCritical = failOnCriticalEnv ? failOnCriticalEnv.toLowerCase() === "true" : Boolean(config.fail_on_critical);
   const repoRuns = loadRepoHistoryRuns(repoSlug);
   const effectiveThresholds = computeAdaptiveThresholds(config, repoRuns);
   const result = runAgentLoop({ pr, files, config, repoSlug });
@@ -2094,7 +2604,7 @@ async function main() {
       : null;
 
   let missingRequired = computeMissingRequired(required, currentCoverage, prAuthor);
-  const shouldRequest = reviewerRoutingFinal.enabled && reviewerRoutingFinal.autoRequest && !mockPr;
+  const shouldRequest = reviewerRoutingFinal.enabled && reviewerRoutingFinal.autoRequest && !mockPr && !envFlag("REVIEW_OS_SIMULATION_ONLY");
   if (shouldRequest && (missingRequired.users.length || missingRequired.teams.length)) {
     const requestPayload = {
       users: [...new Set([...reviewerRoutingFinal.users, ...missingRequired.users])].filter((u) => u && u !== prAuthor),
@@ -2211,6 +2721,28 @@ async function main() {
     nextSteps.unshift("Wait for the allowed merge window before merging this high-risk PR.");
   }
 
+  const debtLedger = updateReviewDebtLedger({
+    config,
+    repoSlug,
+    pr,
+    result,
+    archetype,
+    timestamp: new Date().toISOString(),
+  });
+  const simulation = runRiskSimulation({
+    pr,
+    files,
+    repoSlug,
+    repoRuns,
+    baseConfig: config,
+    currentCoverage,
+    codeownerRules,
+    prAuthor,
+    baseResult: result,
+    baseRouting: reviewerRoutingFinal,
+  });
+  const simulationOnly = Boolean(simulation?.simulationOnly);
+
   const requiredCoverage = {
     required,
     missing: missingRequired,
@@ -2227,6 +2759,7 @@ async function main() {
     pr,
     result,
     nextSteps,
+    archetype,
     reviewerRouting: reviewerRoutingFinal,
     requiredCoverage,
     fixSuggestions,
@@ -2236,6 +2769,8 @@ async function main() {
     ownerSla,
     contextBudget,
     mergeWindow,
+    debtLedger,
+    simulation,
   });
   const autoRequestAttempted = reviewerRoutingFinal.enabled && reviewerRoutingFinal.autoRequest;
   const approvedByReviewer = (reviews || []).some((r) => String(r.state || "").toUpperCase() === "APPROVED");
@@ -2259,6 +2794,7 @@ async function main() {
       autoRequestAttempted,
       requestedViaRequired,
       loadBalanced: Boolean(config.reviewer_routing?.load_balance_enabled),
+      fairness: reviewerRoutingFinal.fairness || { users: {}, teams: {} },
     },
     pathPolicy: {
       matchedRules: result.matchedPathRules || [],
@@ -2270,9 +2806,12 @@ async function main() {
     escalationPlan,
     crossPrDuplicates: crossDup.matches,
     policyDrift,
+    archetype,
     ownerSla,
     contextBudget,
     mergeWindow,
+    debtLedger,
+    simulation,
     promptTracePath: "",
     checklist,
     approvalCount,
@@ -2327,6 +2866,7 @@ async function main() {
           teams: reviewerRoutingFinal.teams,
           autoRequest: reviewerRoutingFinal.autoRequest,
           requestedViaRequired,
+          fairness: reviewerRoutingFinal.fairness || { users: {}, teams: {} },
         },
         requiredCoverage,
         matchedPathRules: result.matchedPathRules || [],
@@ -2340,9 +2880,12 @@ async function main() {
         ownerSla,
         contextBudget,
         mergeWindow,
+        debtLedger,
+        simulation,
         regressionSignature: regression.signature,
         regressionRepeats: regression.repeats + 1,
         scorecard,
+        archetype,
       },
       null,
       2
@@ -2350,7 +2893,7 @@ async function main() {
   );
   const historyFilePath = saveHistory(repoSlug, pr.number, historyEntry);
 
-  if (process.env.DRY_RUN_COMMENT === "1" || mockPr) {
+  if (process.env.DRY_RUN_COMMENT === "1" || mockPr || simulationOnly) {
     console.log(comment);
     console.log(`History updated: ${historyFilePath}`);
     console.log(`Suggested users: ${reviewerRoutingFinal.users.join(",") || "none"}`);
@@ -2425,6 +2968,7 @@ async function main() {
     pr,
     result,
     nextSteps,
+    archetype,
     reviewerRouting: reviewerRoutingFinal,
     requiredCoverage,
     matchedRules: result.matchedPathRules || [],
@@ -2435,19 +2979,21 @@ async function main() {
     ownerSla,
     contextBudget,
     mergeWindow,
+    debtLedger,
+    simulation,
   });
 
-  if (failOnCritical && result.grouped.critical.length > 0) {
+  if (!simulationOnly && failOnCritical && result.grouped.critical.length > 0) {
     console.error(`Critical findings present (${result.grouped.critical.length}). Failing job.`);
     process.exit(1);
   }
 
-  if (config.release_gate?.enabled && isReleasePr(pr, config) && result.grouped.critical.length > 0) {
+  if (!simulationOnly && config.release_gate?.enabled && isReleasePr(pr, config) && result.grouped.critical.length > 0) {
     console.error("Release gate blocked: unresolved critical findings on release PR.");
     process.exit(1);
   }
 
-  if (mergeWindow.blocked) {
+  if (!simulationOnly && mergeWindow.blocked) {
     console.error(`Merge window blocked: ${mergeWindow.reason}`);
     process.exit(1);
   }

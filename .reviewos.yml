@@ -26,6 +26,8 @@ reviewer_routing:
   load_balance_weight: 0.6
   weekly_capacity_per_user: 10
   weekly_capacity_per_team: 20
+  fairness_enabled: true
+  fairness_weight: 0.35
 
 labels:
   enabled: true
@@ -112,6 +114,21 @@ merge_window:
   start_hour: 10
   end_hour: 18
   high_risk_security_threshold: 78
+
+archetypes:
+  enabled: true
+  default: chore
+  overrides:
+    docs:
+      engineering_warning_delta: -5
+    release:
+      security_warning_delta: 5
+      max_iterations: 4
+      fail_on_critical: true
+
+debt_ledger:
+  enabled: true
+  file: .reviewos/review-debt.json
 
 alerts:
   enabled: false

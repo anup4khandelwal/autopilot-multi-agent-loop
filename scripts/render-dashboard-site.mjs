@@ -10,6 +10,9 @@ const QUEUE_CSV = "docs/reviewer-queue.csv";
 const HEATMAP_CSV = "docs/change-risk-heatmap.csv";
 const HEATMAP_JSON = "docs/change-risk-heatmap.json";
 const DRIFT_CSV = "docs/policy-drift.csv";
+const DEBT_MD = "docs/review-debt.md";
+const DEBT_CSV = "docs/review-debt.csv";
+const EXECUTIVE_DIGEST_MD = "docs/executive-weekly-digest.md";
 const OWNERSHIP_CSV = "docs/finding-ownership.csv";
 const OWNERSHIP_MD = "docs/finding-ownership.md";
 const BADGE_DIR = "docs/badges";
@@ -43,6 +46,14 @@ const heatmapJsonExists = fs.existsSync(HEATMAP_JSON);
 const heatmapJsonLink = heatmapJsonExists ? `<div class="meta"><a href="./change-risk-heatmap.json">Download Change-Risk Heatmap JSON</a></div>` : "";
 const driftCsvExists = fs.existsSync(DRIFT_CSV);
 const driftCsvLink = driftCsvExists ? `<div class="meta"><a href="./policy-drift.csv">Download Policy Drift CSV</a></div>` : "";
+const debtMdExists = fs.existsSync(DEBT_MD);
+const debtMdLink = debtMdExists ? `<div class="meta"><a href="./review-debt.md">View Review Debt Ledger (Markdown)</a></div>` : "";
+const debtCsvExists = fs.existsSync(DEBT_CSV);
+const debtCsvLink = debtCsvExists ? `<div class="meta"><a href="./review-debt.csv">Download Review Debt CSV</a></div>` : "";
+const executiveDigestExists = fs.existsSync(EXECUTIVE_DIGEST_MD);
+const executiveDigestLink = executiveDigestExists
+  ? `<div class="meta"><a href="./executive-weekly-digest.md">View Executive Weekly Digest</a></div>`
+  : "";
 const ownershipCsvExists = fs.existsSync(OWNERSHIP_CSV);
 const ownershipCsvLink = ownershipCsvExists
   ? `<div class="meta"><a href="./finding-ownership.csv">Download Finding Ownership CSV</a></div>`
@@ -81,6 +92,9 @@ const html = `<!doctype html>
     ${heatmapCsvLink}
     ${heatmapJsonLink}
     ${driftCsvLink}
+    ${debtMdLink}
+    ${debtCsvLink}
+    ${executiveDigestLink}
     ${ownershipCsvLink}
     ${ownershipMdLink}
     ${badgeLink}
@@ -117,6 +131,15 @@ if (heatmapJsonExists) {
 }
 if (driftCsvExists) {
   fs.copyFileSync(DRIFT_CSV, `${OUT_DIR}/policy-drift.csv`);
+}
+if (debtMdExists) {
+  fs.copyFileSync(DEBT_MD, `${OUT_DIR}/review-debt.md`);
+}
+if (debtCsvExists) {
+  fs.copyFileSync(DEBT_CSV, `${OUT_DIR}/review-debt.csv`);
+}
+if (executiveDigestExists) {
+  fs.copyFileSync(EXECUTIVE_DIGEST_MD, `${OUT_DIR}/executive-weekly-digest.md`);
 }
 if (ownershipCsvExists) {
   fs.copyFileSync(OWNERSHIP_CSV, `${OUT_DIR}/finding-ownership.csv`);

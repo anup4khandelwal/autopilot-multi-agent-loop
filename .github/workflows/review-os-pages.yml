@@ -28,8 +28,10 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           node scripts/build-dashboard.mjs
+          node scripts/build-debt-ledger.mjs
           node scripts/build-ownership-report.mjs
           node scripts/build-reviewer-queue.mjs
+          node scripts/build-executive-digest.mjs
           node scripts/build-badges.mjs
 
       - name: Render dashboard site

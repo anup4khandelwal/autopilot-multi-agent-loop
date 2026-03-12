@@ -2,13 +2,13 @@
 
 ReviewOps Copilot for pull requests. `review-os` shifts teams from implementation-heavy flow to structured review across Engineering, Product, Design, and Security.
 
-## Latest Update (v0.1.9)
+## Latest Update (v0.1.10)
 
-- Added live reviewer queue board with assignment, pending review, and capacity data
-- Added owner-specific SLA thresholds and escalation timers
-- Added context window budget advisor for large PR review prompts
-- Added risk-aware merge window policy for high-risk PRs
-- Added historical benchmark badges for readiness, latency, and critical rate
+- Added reviewer fairness scoring to keep routing equitable over time
+- Added PR archetype classification with policy overrides by PR type
+- Added persistent review debt ledger with markdown and CSV exports
+- Added risk simulation mode for alternate policy and routing outcomes without mutating PR state
+- Added executive weekly digest output for engineering and product leadership
 
 ## What it does
 
@@ -26,11 +26,13 @@ ReviewOps Copilot for pull requests. `review-os` shifts teams from implementatio
 - Sends optional Slack/Discord alerts on critical findings
 - Supports alert deduplication and route-based channel selection
 - Optionally auto-manages PR labels based on review state
+- Classifies PRs into archetypes such as feature, bugfix, docs, infra, refactor, and release
 - Stores review memory in `.reviewos/history/*.json`
 - Writes machine-readable latest report to `.reviewos/last-report.json`
 - Exports SARIF findings for security scanning integrations
 - Captures structured scoring traces for each lens
 - Supports incident-safe review mode for stricter merge safety during incidents
+- Tracks unresolved warning/critical findings in `.reviewos/review-debt.json`
 - Exports finding ownership reports (`docs/finding-ownership.md`, `docs/finding-ownership.csv`)
 - Generates trend dashboard `docs/review-dashboard.md`
 - Exports dashboard dataset as CSV `docs/review-dashboard.csv`
@@ -88,6 +90,7 @@ Use `.reviewos.yml`:
 - `reviewer_routing.risk_based` boost risky-domain owner routing
 - `reviewer_routing.load_balance_*` configure reviewer load balancing behavior
 - `reviewer_routing.weekly_capacity_per_user|weekly_capacity_per_team` cap reviewer assignment load
+- `reviewer_routing.fairness_enabled|fairness_weight` bias routing toward historically underused reviewers
 - `labels.enabled` enable PR label automation
 - `labels.critical_label|security_label|ready_label` managed labels
 - `fix_suggestions.enabled|max_items` include remediation hints in PR report
@@ -102,6 +105,8 @@ Use `.reviewos.yml`:
 - `policy_drift.*` alert threshold divergence from configured baseline
 - `context_budget.*` estimate prompt budget and suggest compression strategy
 - `merge_window.*` enforce merge timing for high-risk PRs
+- `archetypes.default|overrides.*` classify PR intent and adjust policy per archetype
+- `debt_ledger.enabled|file` persist unresolved review debt across PR runs
 - `finding_ownership.default_owner|rules` team mapping for findings
 - `path_overrides` apply path-based penalties and test requirements
 - `alerts.enabled` enable Slack/Discord critical alerts
@@ -129,6 +134,22 @@ bash scripts/simulate-review.sh
 ```
 
 This runs the review loop on `scripts/mock-pr.json` + `scripts/mock-files.json` and writes history snapshots.
+
+## Risk simulation mode
+
+```bash
+bash scripts/run-risk-simulation.sh
+```
+
+This runs ReviewOS in simulation-only mode. It compares the current PR outcome against alternate risk assumptions and policy presets without posting comments, labels, or reviewer requests.
+
+Useful env vars:
+
+- `REVIEW_OS_SIMULATION=1`
+- `REVIEW_OS_SIMULATION_ONLY=1`
+- `REVIEW_OS_SIMULATION_PROFILE=high|low`
+- `REVIEW_OS_SIMULATION_PRESET=startup|fintech|enterprise`
+- `REVIEW_OS_SIMULATION_CONFIG=/path/to/alternate-config.yml`
 
 ## Path-based policy overrides
 
@@ -165,6 +186,9 @@ Also writes: `docs/reviewer-queue.md`
 Also writes: `docs/reviewer-queue.csv`
 Also writes: `docs/change-risk-heatmap.csv|json`
 Also writes: `docs/policy-drift.csv`
+Also writes: `docs/review-debt.md`
+Also writes: `docs/review-debt.csv`
+Also writes: `docs/executive-weekly-digest.md`
 Also writes: `docs/badges/*.json`
 
 ## Publish dashboard (Pages)
@@ -195,6 +219,8 @@ It will:
   - weekly dashboard build artifact
 - `.github/workflows/review-os-pages.yml`
   - weekly + manual dashboard publishing to GitHub Pages
+- `.github/workflows/review-os-executive-digest.yml`
+  - weekly leadership digest artifact for engineering/product stakeholders
 - `.github/workflows/quality.yml`
   - full validation matrix (`scripts/validate.sh`)
 

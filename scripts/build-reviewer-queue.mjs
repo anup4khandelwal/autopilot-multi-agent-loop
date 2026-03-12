@@ -122,18 +122,36 @@ function mergeRows(kind, liveMap, stateMap, weeklyCap) {
       weeklyCap,
       utilization,
       totalCount,
+      fairnessScore: 50,
       prs: live.prs || [],
     });
   }
   return rows.sort((a, b) => b.pending - a.pending || b.assigned - a.assigned || a.reviewer.localeCompare(b.reviewer));
 }
 
+function applyFairnessScores(rows) {
+  const counts = rows.map((row) => Number(row.totalCount || 0));
+  const min = counts.length ? Math.min(...counts) : 0;
+  const max = counts.length ? Math.max(...counts) : 0;
+  return rows.map((row) => {
+    if (max <= min) return { ...row, fairnessScore: 50 };
+    const ratio = (Number(row.totalCount || 0) - min) / Math.max(1, max - min);
+    return {
+      ...row,
+      fairnessScore: Math.round(Math.max(0, Math.min(100, 100 - ratio * 100))),
+    };
+  });
+}
+
 function buildTable(rows) {
   if (!rows.length) return "No live reviewer queue data available.";
-  const head = "| Kind | Reviewer | Assigned PRs | Pending Reviews | Weekly Load | Weekly Cap | Utilization | Total Historical Assignments |";
-  const sep = "|---|---|---:|---:|---:|---:|---:|---:|";
+  const head = "| Kind | Reviewer | Assigned PRs | Pending Reviews | Weekly Load | Weekly Cap | Utilization | Fairness Score | Total Historical Assignments |";
+  const sep = "|---|---|---:|---:|---:|---:|---:|---:|---:|";
   const body = rows
-    .map((r) => `| ${r.kind} | ${r.reviewer} | ${r.assigned} | ${r.pending} | ${r.weeklyCount} | ${r.weeklyCap} | ${r.utilization}% | ${r.totalCount} |`)
+    .map(
+      (r) =>
+        `| ${r.kind} | ${r.reviewer} | ${r.assigned} | ${r.pending} | ${r.weeklyCount} | ${r.weeklyCap} | ${r.utilization}% | ${r.fairnessScore} | ${r.totalCount} |`
+    )
     .join("\n");
   return `${head}\n${sep}\n${body}`;
 }
@@ -144,8 +162,8 @@ async function main() {
   const userCap = parseNumericConfig("weekly_capacity_per_user", 10);
   const teamCap = parseNumericConfig("weekly_capacity_per_team", 20);
   const live = await fetchLiveQueue(process.env.GITHUB_TOKEN, process.env.GITHUB_REPOSITORY);
-  const userRows = mergeRows("user", live.users, state.users || {}, userCap);
-  const teamRows = mergeRows("team", live.teams, state.teams || {}, teamCap);
+  const userRows = applyFairnessScores(mergeRows("user", live.users, state.users || {}, userCap));
+  const teamRows = applyFairnessScores(mergeRows("team", live.teams, state.teams || {}, teamCap));
   const rows = [...userRows, ...teamRows];
 
   const md = `# Reviewer Queue Board\n\nGenerated: ${new Date().toISOString()}\n\n## Queue\n\n${buildTable(rows)}\n\n## Open PR Assignments\n\n${
@@ -156,8 +174,11 @@ async function main() {
       : "No open PR assignment data available."
   }\n`;
   const csvLines = [
-    "kind,reviewer,assigned_prs,pending_reviews,weekly_load,weekly_cap,utilization,total_historical_assignments,prs",
-    ...rows.map((r) => `${r.kind},${r.reviewer},${r.assigned},${r.pending},${r.weeklyCount},${r.weeklyCap},${r.utilization},${r.totalCount},"${r.prs.join(" ")}"`),
+    "kind,reviewer,assigned_prs,pending_reviews,weekly_load,weekly_cap,utilization,total_historical_assignments,fairness_score,prs",
+    ...rows.map(
+      (r) =>
+        `${r.kind},${r.reviewer},${r.assigned},${r.pending},${r.weeklyCount},${r.weeklyCap},${r.utilization},${r.totalCount},${r.fairnessScore},"${r.prs.join(" ")}"`
+    ),
   ];
 
   fs.writeFileSync(OUT_MD, md);

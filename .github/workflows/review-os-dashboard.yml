@@ -22,8 +22,10 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           node scripts/build-dashboard.mjs
+          node scripts/build-debt-ledger.mjs
           node scripts/build-ownership-report.mjs
           node scripts/build-reviewer-queue.mjs
+          node scripts/build-executive-digest.mjs
           node scripts/build-badges.mjs
 
       - name: Upload dashboard artifact
@@ -41,6 +43,9 @@ jobs:
             docs/change-risk-heatmap.csv
             docs/change-risk-heatmap.json
             docs/policy-drift.csv
+            docs/review-debt.md
+            docs/review-debt.csv
+            docs/executive-weekly-digest.md
             docs/finding-ownership.md
             docs/finding-ownership.csv
             docs/badges

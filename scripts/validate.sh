@@ -27,13 +27,19 @@ node --check src/release-gate.mjs
 node --check src/sla-reminder.mjs
 node --check scripts/build-ownership-report.mjs
 node --check scripts/build-reviewer-queue.mjs
+node --check scripts/build-debt-ledger.mjs
+node --check scripts/build-executive-digest.mjs
 node --check scripts/build-badges.mjs
+node --check scripts/test-v010-features.mjs
 
 echo "[5/6] Build dashboard outputs..."
 node scripts/build-dashboard.mjs >/tmp/reviewos-dashboard.log
+node scripts/build-debt-ledger.mjs >/tmp/reviewos-debt.log
 node scripts/build-ownership-report.mjs >/tmp/reviewos-ownership.log
 node scripts/build-reviewer-queue.mjs >/tmp/reviewos-queue.log
+node scripts/build-executive-digest.mjs >/tmp/reviewos-digest.log
 node scripts/build-badges.mjs >/tmp/reviewos-badges.log
+node scripts/test-v010-features.mjs >/tmp/reviewos-v010.log
 test -f docs/review-dashboard.csv
 test -f docs/repo-baseline.csv
 test -f docs/review-confidence.csv
@@ -43,6 +49,9 @@ test -f docs/reviewer-queue.csv
 test -f docs/change-risk-heatmap.csv
 test -f docs/change-risk-heatmap.json
 test -f docs/policy-drift.csv
+test -f docs/review-debt.md
+test -f docs/review-debt.csv
+test -f docs/executive-weekly-digest.md
 test -f docs/finding-ownership.csv
 test -f docs/badges/readiness.json
 

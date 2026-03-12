@@ -99,6 +99,7 @@ function writeCsv(runs) {
   const header = [
     "timestamp",
     "pr",
+    "archetype",
     "merge_readiness",
     "engineering",
     "product",
@@ -108,6 +109,7 @@ function writeCsv(runs) {
     "warning",
     "info",
     "missing_reviewers",
+    "debt_open",
   ];
   const lines = [header.join(",")];
   for (const r of runs) {
@@ -119,6 +121,7 @@ function writeCsv(runs) {
     const row = [
       r.timestamp || "",
       String(r.pr || ""),
+      String(r.archetype?.name || r.archetype || ""),
       Number(r.mergeReadiness || 0),
       Number(r.scores?.engineering || 0),
       Number(r.scores?.product || 0),
@@ -128,6 +131,7 @@ function writeCsv(runs) {
       warning,
       info,
       missing,
+      Number(r.debtLedger?.openCount || 0),
     ];
     lines.push(row.join(","));
   }
@@ -155,8 +159,10 @@ function buildDashboard(runs) {
   let autoRequestAttempts = 0;
   let autoRequestSuccess = 0;
   const latencySeries = [];
+  const debtSeries = [];
   const driftRows = [];
   const heatmap = new Map();
+  const archetypeCounts = new Map();
 
   const criticalPathCounts = new Map();
 
@@ -190,6 +196,17 @@ function buildDashboard(runs) {
       const lat = Number(r.reviewerLatency.firstReviewLatencyHours);
       if (Number.isFinite(lat)) latencySeries.push(lat);
     }
+    if (r.debtLedger) {
+      debtSeries.push({
+        timestamp: r.timestamp || "",
+        pr: r.pr || "",
+        openCount: Number(r.debtLedger.openCount || 0),
+        newCount: Number(r.debtLedger.newCount || 0),
+        resolvedCount: Number(r.debtLedger.resolvedCount || 0),
+      });
+    }
+    const archetypeName = String(r.archetype?.name || r.archetype || "unknown");
+    archetypeCounts.set(archetypeName, (archetypeCounts.get(archetypeName) || 0) + 1);
     if (r.policyDrift?.driftRows) {
       for (const d of r.policyDrift.driftRows) {
         driftRows.push({
@@ -294,6 +311,10 @@ function buildDashboard(runs) {
     .sort((a, b) => b.riskScore - a.riskScore)
     .slice(0, 12);
   const driftRecent = driftRows.slice(-20).reverse();
+  const archetypeRows = [...archetypeCounts.entries()]
+    .map(([archetype, count]) => ({ archetype, count }))
+    .sort((a, b) => b.count - a.count || a.archetype.localeCompare(b.archetype));
+  const debtRecent = debtSeries.slice(-10).reverse();
 
   return `# ReviewOS Trend Dashboard
 
@@ -348,9 +369,17 @@ ${buildTable(
 - Auto-request success rate: ${autoRequestRate.toFixed(1)}%
 - Mean time to first review (hours): ${avgLatency ? avgLatency.toFixed(2) : "N/A"}
 
+## PR Archetype Mix
+
+${archetypeRows.length ? buildTable(["Archetype", "Runs"], archetypeRows.map((row) => [row.archetype, String(row.count)])) : "No archetype data yet."}
+
 ## Merge Readiness Trend (Recent 10)
 
 ${readinessBars || "No data yet."}
+
+## Review Debt Trend
+
+${debtRecent.length ? buildTable(["Timestamp", "PR", "Open Debt", "New", "Resolved"], debtRecent.map((row) => [String(row.timestamp).slice(0, 19), String(row.pr), String(row.openCount), String(row.newCount), String(row.resolvedCount)])) : "No review debt history yet."}
 
 ## Readiness Anomalies
 

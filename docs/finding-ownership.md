@@ -1,10 +1,10 @@
 # Finding Ownership Report
 
-Generated: 2026-03-12T11:40:50.026Z
+Generated: 2026-03-12T14:03:08.373Z
 
 | Owner | Total | Critical | Warning | Info |
 |---|---:|---:|---:|---:|
-| unassigned | 223 | 40 | 123 | 60 |
+| unassigned | 237 | 40 | 137 | 60 |
 | security | 40 | 10 | 30 | 0 |
 | platform | 25 | 0 | 5 | 20 |
 | product | 10 | 0 | 10 | 0 |
