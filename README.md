@@ -36,6 +36,37 @@ ReviewOps Copilot for pull requests. `review-os` shifts teams from implementatio
 - Exports dashboard dataset as CSV `docs/review-dashboard.csv`
 - Publishes dashboard to GitHub Pages via workflow
 
+## For product and design teams
+
+`review-os` is not only a code-quality tool. It is a release-readiness system for pull requests.
+
+Real-life scenario:
+
+- A PM wants to launch a new onboarding flow to improve signup conversion.
+- A designer updates the journey, copy, and mobile states.
+- An engineer implements the change quickly with AI assistance and opens a PR.
+- The PR compiles, but important gaps still exist:
+  - returning-user behavior is incomplete
+  - mobile layout may break on smaller screens
+  - analytics tracking is missing or inconsistent
+  - security review is needed because user-profile data changed
+  - the wrong reviewers get assigned, so the PR waits
+
+What `review-os` does in that situation:
+
+- reviews the PR across engineering, product, design, and security lenses
+- posts a clear ship-readiness summary with risks and next steps
+- routes the PR to the right owners and reviewers
+- generates a practical checklist for approval
+- blocks unsafe merges when policy, risk, or release timing requires it
+
+Why this matters for non-engineering teams:
+
+- PMs get faster proof that implementation matches product intent
+- designers catch UX and quality risks before release
+- teams spend less time chasing reviewers manually
+- launches become more predictable because readiness is visible in the PR itself
+
 ## Quick start
 
 1. Add workflow `.github/workflows/review-os.yml`.
