@@ -1,0 +1,30 @@
+name: codex-stack fleet status
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+  schedule:
+    - cron: '17 8 * * 1-5'
+
+jobs:
+  status:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6.0.2
+
+      - name: Build fleet status payload
+        run: |
+          node .github/codex-stack/fleet-status.js             --out .codex-stack/fleet-status/status.json             --markdown-out .codex-stack/fleet-status/summary.md
+
+      - name: Upload fleet status artifact
+        uses: actions/upload-artifact@v7.0.0
+        with:
+          name: codex-stack-fleet-status
+          path: .codex-stack/fleet-status/
+          if-no-files-found: error

@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-03-15T11:06:55.413Z",
+  "controlRepo": "anup4khandelwal/codex-stack",
+  "controlRef": "026f4b9213e8100af70256eb37f3296451e0de4d",
+  "sourceManifest": ".codex-stack/fleet.anup4khandelwal.json",
+  "repo": "anup4khandelwal/autopilot-multi-agent-loop",
+  "branch": "main",
+  "team": "reviewops",
+  "policyPack": "default",
+  "requiredChecks": [
+    "deploy",
+    "fleet-status",
+    "preview",
+    "review"
+  ],
+  "previewUrlTemplate": "",
+  "metadata": {},
+  "qa": {
+    "mode": "diff-aware",
+    "paths": [],
+    "devices": [
+      "desktop",
+      "mobile"
+    ],
+    "flows": [],
+    "snapshots": [],
+    "a11y": true,
+    "perf": true,
+    "perfBudgets": [
+      "cls=0.1",
+      "lcp=2.5s"
+    ]
+  },
+  "preview": {
+    "paths": [
+      "/",
+      "/dashboard"
+    ],
+    "devices": [
+      "desktop",
+      "mobile"
+    ],
+    "flows": [],
+    "snapshots": [],
+    "waitTimeout": 300,
+    "strictConsole": false,
+    "strictHttp": true
+  },
+  "decisions": {
+    "staleAfterDays": 14,
+    "expiringSoonDays": 7
+  },
+  "schedule": {
+    "cron": "17 8 * * 1-5"
+  },
+  "statusArtifactName": "codex-stack-fleet-status"
+}
