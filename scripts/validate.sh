@@ -30,6 +30,7 @@ node --check scripts/build-reviewer-queue.mjs
 node --check scripts/build-debt-ledger.mjs
 node --check scripts/build-executive-digest.mjs
 node --check scripts/build-badges.mjs
+node --check scripts/fleet-rollout-test.mjs
 node --check scripts/test-v010-features.mjs
 
 echo "[5/6] Build dashboard outputs..."
@@ -39,6 +40,7 @@ node scripts/build-ownership-report.mjs >/tmp/reviewos-ownership.log
 node scripts/build-reviewer-queue.mjs >/tmp/reviewos-queue.log
 node scripts/build-executive-digest.mjs >/tmp/reviewos-digest.log
 node scripts/build-badges.mjs >/tmp/reviewos-badges.log
+node scripts/fleet-rollout-test.mjs >/tmp/reviewos-fleet.log
 node scripts/test-v010-features.mjs >/tmp/reviewos-v010.log
 test -f docs/review-dashboard.csv
 test -f docs/repo-baseline.csv
