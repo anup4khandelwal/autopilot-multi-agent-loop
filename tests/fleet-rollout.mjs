@@ -15,13 +15,14 @@ function readJson(relativePath) {
 
 const member = readJson('.codex-stack/fleet-member.json');
 assert.equal(member.repo, 'anup4khandelwal/autopilot-multi-agent-loop');
-assert.equal(member.policyPack, 'default');
-assert.deepEqual(member.requiredChecks, ['deploy', 'fleet-status', 'preview', 'review']);
+assert.equal(member.policyPack, 'review-only');
+assert.deepEqual(member.requiredChecks, ['fleet-status', 'review']);
 assert.equal(member.qa.mode, 'diff-aware');
-assert.equal(member.qa.a11y, true);
-assert.equal(member.qa.perf, true);
-assert.deepEqual(member.preview.paths, ['/', '/dashboard']);
-assert.deepEqual(member.preview.devices, ['desktop', 'mobile']);
+assert.equal(member.qa.a11y, false);
+assert.equal(member.qa.perf, false);
+assert.deepEqual(member.preview.paths, []);
+assert.deepEqual(member.preview.devices, []);
+assert.equal(member.status.requiresLatestReport, false);
 
 const workflow = readText('.github/workflows/codex-stack-fleet-status.yml');
 assert.match(workflow, /name:\s+codex-stack fleet status/);
